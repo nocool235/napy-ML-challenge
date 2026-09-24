@@ -1,0 +1,28 @@
+# environments
+.venv/
+envs/
+__pycache__/
+*.pyc
+
+# competition data and anything derived from it - never commit, public or private
+dataset/
+utils/
+data_sample*/
+synthetic_dataset/
+reports/
+.baseline/
+
+# run artefacts
+output*
+cache*/
+logs/
+*.log
+*.pkl
+*.parquet
+*.npy
+*.npz
+*.bin
+*.zip
+
+.DS_Store
+.ipynb_checkpoints/
