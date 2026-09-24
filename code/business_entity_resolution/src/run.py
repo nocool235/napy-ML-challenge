@@ -83,7 +83,9 @@ def self_validate(match_p: Path, cand_p: Path, s1_ids, c_ids):
 
 
 # ----------------------------------------------------------------------------- stages
-def build_split(split, s1_raw, c_raw, vecs, name_freq, cache: Path | None):
+def build_split(split, s1_raw, c_raw, vecs, name_freq, cache: Path | None, keep_frac: float = 1.0):
+    """keep_frac < 1: block with ALL S1 records (so S1s compete for candidates exactly as at test time),
+    then keep a random share of S1 records and their pairs before the (expensive) feature step."""
     cp = cache / f"{split}_pairs.pkl" if cache else None
     if cp and cp.exists():
         print(f"[cache] loading {cp}")
@@ -91,6 +93,17 @@ def build_split(split, s1_raw, c_raw, vecs, name_freq, cache: Path | None):
     s1, cand = normalize_frame(s1_raw), normalize_frame(c_raw)
     X1, XC = transform(vecs, s1), transform(vecs, cand)
     pairs = generate_candidates(s1, cand, X1, XC)
+    if keep_frac < 1.0:
+        rows = np.sort(np.random.default_rng(config.SEED).choice(len(s1), round(keep_frac * len(s1)), replace=False))
+        new_i = np.full(len(s1), -1, np.int64)
+        new_i[rows] = np.arange(len(rows))
+        attrs = pairs.attrs
+        pairs = pairs[new_i[pairs["i"].to_numpy()] >= 0].reset_index(drop=True)
+        pairs["i"] = new_i[pairs["i"].to_numpy()]
+        pairs.attrs = attrs
+        s1 = s1.iloc[rows].reset_index(drop=True)
+        X1 = {v: m[rows] for v, m in X1.items()}
+        print(f"[data] --train-frac {keep_frac}: kept {len(s1):,} S1 records, {len(pairs):,} pairs")
     F = pair_features(pairs, s1, cand, X1, XC, name_freq)
     out = (s1, cand, pairs, F)
     if cp:
@@ -108,6 +121,8 @@ def main():
     ap.add_argument("--cv", choices=["group", "country"], default="group")
     ap.add_argument("--validate-only", action="store_true", help="CV on train only; skip test")
     ap.add_argument("--no-stage2", action="store_true")
+    ap.add_argument("--train-frac", type=float, default=1.0,
+                    help="random share of train S1 records to train on (blocking still sees all S1); test always uses all of S1")
     args = ap.parse_args()
 
     t0 = time.time()
@@ -142,10 +157,11 @@ def main():
             pickle.dump((vecs, name_freq), open(vec_p, "wb"))
 
     # ---------------- train
-    s1, cand, pairs, F = build_split("train", tr_s1, tr_c, vecs, name_freq, cache)
+    tag = "train" if args.train_frac >= 1.0 else f"train_f{args.train_frac:g}"
+    s1, cand, pairs, F = build_split(tag, tr_s1, tr_c, vecs, name_freq, cache, args.train_frac)
     s1_ids, c_ids = s1["entity_id"].to_numpy(dtype=object), cand["entity_id"].to_numpy(dtype=object)
     truth = {k: truth.get(k, set()) for k in s1_ids}
-    rep = blocking_report(pairs, s1, cand, truth)
+    rep = {**blocking_report(pairs, s1, cand, truth), **pairs.attrs.get("blk_stats", {})}
     print("[blocking] " + json.dumps({k: round(v, 4) for k, v in rep.items()}))
 
     i, j = F["i"].values, F["j"].values

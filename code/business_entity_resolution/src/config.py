@@ -14,8 +14,15 @@ VIEWS = {
     "nums_name": {"col": "blk_nums_name", "tfidf": {"analyzer": "word", "token_pattern": r"\S+"}},
 }
 # neighbours kept per view: forward = per S1 record per source (S2, S3); backward = per S2/S3 record
-K_FWD = {"name": 10, "addr": 5, "name_addr": 15, "name_word": 5, "nums_name": 5}
-K_BWD = {"name": 3, "addr": 2, "name_addr": 5, "name_word": 2, "nums_name": 2}
+# Applied twice: as the top-K inside each key group, then again after a global re-rank of the union.
+K_FWD = {"name": 2, "addr": 2, "name_addr": 6, "name_word": 2, "nums_name": 2}
+K_BWD = {"name": 1, "addr": 1, "name_addr": 2, "name_word": 1, "nums_name": 1}
+
+# partitioned blocking: top-K search runs only inside groups of records sharing a key (see blocking.py).
+# Values are prefix lengths (pc, nospace, fallback_name) or how many rarest tokens become keys.
+BLOCK_KEYS = {"pc": 3, "name_rare": 2, "addr_rare": 3, "nospace": 6, "num_rare": 2, "fallback_name": 2}
+TINY_GROUP_CELLS = 2_000       # groups with |S1_g| x |cand_g| <= this are scored as explicit pairs
+TINY_BATCH_CELLS = 5_000_000   # explicit pairs per batch
 
 # ---------------- model ----------------
 N_FOLDS = 5
