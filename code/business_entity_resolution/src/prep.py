@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import multiprocessing as mp
 import sys
 from collections import Counter
 from concurrent.futures import ProcessPoolExecutor
@@ -30,6 +31,10 @@ NORM_VERSION = "v2"
 SRC = Path(__file__).resolve().parent
 SPLITS = ("train", "test")
 SOURCES = ("source1", "source2", "source3")
+# Workers must be spawned, not forked: polars keeps a thread pool, and a forked child inherits its locks in
+# whatever state they were in, so the child blocks forever on its first polars call (0% CPU, nothing written).
+# Linux defaults to fork; macOS defaults to spawn, which is why this only showed up on AWS.
+MP = mp.get_context("spawn")
 STR_COLS = ["name_clean", "name_core", "name_nospace", "name_initials", "name_legal", "name_alts", "name_nums",
             "name_skel", "addr_clean", "addr_nolm", "addr_words", "addr_nums", "addr_postcode", "addr_house",
             "addr_street"]
@@ -99,7 +104,7 @@ def run(data_dir: Path, work_dir: Path, jobs: int = 0, chunk: int = 100_000) -> 
     if maps_p.exists():
         maps = json.loads(maps_p.read_text())
     else:
-        with ProcessPoolExecutor(jobs) as pool:
+        with ProcessPoolExecutor(jobs, mp_context=MP) as pool:
             maps = build_skeleton_maps(data_dir, pool, chunk)
         maps_p.write_text(json.dumps(maps))
         log(f"prep: skeleton maps built from train S1: name={len(maps['name']):,} addr={len(maps['addr']):,}")
@@ -108,7 +113,7 @@ def run(data_dir: Path, work_dir: Path, jobs: int = 0, chunk: int = 100_000) -> 
     if not todo:
         log("prep: all parts present, nothing to do")
         return out_dir
-    with ProcessPoolExecutor(jobs, initializer=_init, initargs=(maps,)) as pool:
+    with ProcessPoolExecutor(jobs, mp_context=MP, initializer=_init, initargs=(maps,)) as pool:
         for sp, so in todo:
             d = out_dir / f"{sp}_{so}"
             d.mkdir(exist_ok=True)
