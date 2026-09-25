@@ -128,7 +128,11 @@ def run(data_dir: Path, work_dir: Path, jobs: int = 0, chunk: int = 100_000) -> 
 
 
 def load(norm: Path, split: str, sources=SOURCES, columns: list[str] | None = None) -> pl.DataFrame:
-    """Read normalised parts back (one or several sources of a split), in file order."""
+    """Read normalised parts back (one or several sources of a split), in file order. Refuses to read a
+    source whose normalisation has not completed (no _SUCCESS marker)."""
+    for so in sources:
+        if not (norm / f"{split}_{so}" / "_SUCCESS").exists():
+            raise FileNotFoundError(f"{norm / f'{split}_{so}'} is incomplete - run prep.py first")
     frames = [pl.read_parquet(sorted((norm / f"{split}_{so}").glob("part-*.parquet")), columns=columns)
               for so in sources]
     return pl.concat(frames)

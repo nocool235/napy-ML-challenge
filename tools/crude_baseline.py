@@ -99,12 +99,17 @@ def similarities(pairs: pl.DataFrame, s1: pl.DataFrame, cand: pl.DataFrame, batc
     return name, addr, empty
 
 
-def decide(i, j, name, addr, empty, w, t):
+def best_per_candidate(j, name, addr, empty, w):
+    """row of the best-scoring S1 for every candidate j, and the score array."""
     score = np.where(empty, name * EMPTY_ADDR_FACTOR, w * name + (1 - w) * addr)
     order = np.lexsort((-score, j))                      # per candidate j, best S1 first
     first = np.ones(len(order), bool)
     first[1:] = j[order][1:] != j[order][:-1]
-    best = order[first]
+    return order[first], score
+
+
+def decide(i, j, name, addr, empty, w, t):
+    best, score = best_per_candidate(j, name, addr, empty, w)
     keep = best[score[best] >= t]
     decide.last_rows = keep
     return i[keep], j[keep]
@@ -155,9 +160,10 @@ def main():
     mix = {"india": 0.47, "us": 0.38}
     best, table = None, []
     for w in W_GRID:
+        best_rows, score = best_per_candidate(j, name, addr, empty, w)
         for t in T_GRID:
-            pi, pj = decide(i, j, name, addr, empty, w, t)
-            f = per_s1_f05(pi, y_of(pi, pj, i, j, y), len(s1), n_true)
+            keep = best_rows[score[best_rows] >= t]
+            f = per_s1_f05(i[keep], y[keep], len(s1), n_true)
             per = {c: float(f[ctry == c].mean()) for c in np.unique(ctry)}
             weighted = sum(mix.get(c, 0) * v for c, v in per.items()) / sum(mix.get(c, 0) for c in per)
             table.append({"w": w, "t": t, **per, "all": float(f.mean()), "test_mix": weighted})

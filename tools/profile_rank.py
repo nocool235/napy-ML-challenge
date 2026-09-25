@@ -30,7 +30,7 @@ from sklearn.preprocessing import normalize as l2norm
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "code" / "business_entity_resolution" / "src"))
 
 NF = 2 ** 22
-VIEWS = {"name_addr": (3, 4), "name": (2, 4)}  # same analyzers as config.VIEWS
+VIEWS = {"name_addr": (3, 4), "name": (2, 4), "addr": (3, 4)}  # same analyzers as config.VIEWS
 T0 = time.time()
 
 
@@ -52,11 +52,11 @@ def norm_chunk(args):
     ac = [addr_fields(a)["addr_clean"] for a in addrs]
     na = [(x + " | " + y).strip() for x, y in zip(nc, ac)]
     df = {}
-    for view, txt in (("name_addr", na), ("name", nc)):
+    for view, txt in (("name_addr", na), ("name", nc), ("addr", ac)):
         X = hv(view).transform(txt)
         idx, cnt = np.unique(X.indices, return_counts=True)
         df[view] = (idx.astype(np.int32), cnt.astype(np.int32))
-    return (na, nc) if keep else None, df
+    return (na, nc, ac) if keep else None, df
 
 
 _G = {}
@@ -136,13 +136,13 @@ def main():
     jobs += [(cand["business_name"][i:i + step].to_list(), cand["business_address"][i:i + step].to_list(), False)
              for i in range(0, len(cand), step)]
     df = {v: np.zeros(NF, np.int64) for v in VIEWS}
-    s1_na, s1_nc = [], []
+    s1_na, s1_nc, s1_ac = [], [], []
     with ProcessPoolExecutor(a.n_jobs) as pool:
         for k, (strs, dfp) in enumerate(pool.map(norm_chunk, jobs)):
             for v, (idx, cnt) in dfp.items():
                 df[v][idx] += cnt
             if strs is not None:
-                s1_na += strs[0]; s1_nc += strs[1]
+                s1_na += strs[0]; s1_nc += strs[1]; s1_ac += strs[2]
             if k % 20 == 0:
                 log(f"normalise {k + 1}/{len(jobs)} chunks")
     n_docs = len(s1) + len(cand)
@@ -151,10 +151,11 @@ def main():
 
     from normalize import name_fields, addr_fields
     q_nc = [name_fields(n)["name_core"] for n in qs["business_name"].to_list()]
-    q_na = [(x + " | " + addr_fields(y)["addr_clean"]).strip() for x, y in zip(q_nc, qs["business_address"].to_list())]
+    q_ac = [addr_fields(y)["addr_clean"] for y in qs["business_address"].to_list()]
+    q_na = [(x + " | " + y).strip() for x, y in zip(q_nc, q_ac)]
     _init({"idf": idf})
-    q_txt = {"name_addr": q_na, "name": q_nc}
-    s1_txt = {"name_addr": s1_na, "name": s1_nc}
+    q_txt = {"name_addr": q_na, "name": q_nc, "addr": q_ac}
+    s1_txt = {"name_addr": s1_na, "name": s1_nc, "addr": s1_ac}
     Q = {v: vec(v, q_txt[v]) for v in VIEWS}
     T = {v: vec(v, [s1_txt[v][r] for r in true_row]) for v in VIEWS}
     cos_true = {v: np.asarray(Q[v].multiply(T[v]).sum(1)).ravel().astype(np.float32) for v in VIEWS}
@@ -205,6 +206,21 @@ def main():
                 cells = [f"{np.mean(r_same[m] <= k):.4f}" for k in ks]
                 md.append(f"| {frac:.0%} | {name} | " + " | ".join(cells) +
                           f" | {np.mean(r_glob[m] <= 1):.4f} | {np.mean(r_glob[m] <= 10):.4f} | {int(np.median(r_same[m]))} |")
+    np.savez_compressed(Path(a.out).with_suffix(".npz"), src=src, qc=qc,
+                        **{f"same_{v}": same[v] for v in VIEWS}, **{f"other_{v}": other[v] for v in VIEWS},
+                        **{f"cos_true_{v}": cos_true[v] for v in VIEWS})
+    md.append("\n## Union of views (true S1 found if its same-country rank <= K in ANY view)\n")
+    md.append("| scale | stratum | views | R@1 | R@3 | R@10 | R@30 | R@100 |")
+    md.append("|---|---|---|---|---|---|---|---|")
+    for frac in (0.01, 0.2, 1.0):
+        n_c = max(1, round(frac * len(chunks)))
+        pick = np.sort(rng.choice(len(chunks), n_c, replace=False)) if frac < 1 else np.arange(len(chunks))
+        rk = {v: 1 + same[v][pick].sum(0) for v in VIEWS}
+        for combo in (("name_addr",), ("name_addr", "name"), ("name_addr", "addr"), ("name_addr", "name", "addr")):
+            r = np.min([rk[v] for v in combo], axis=0)
+            for name, m in strata:
+                md.append(f"| {frac:.0%} | {name} | {'+'.join(combo)} | " +
+                          " | ".join(f"{np.mean(r[m] <= k):.4f}" for k in (1, 3, 10, 30, 100)) + " |")
     # hard negatives: best same-country wrong S1 that beats (or ties) the true S1, full scale
     v = "name_addr"
     r_full = 1 + same[v].sum(0)
