@@ -11,6 +11,9 @@ One row per change. Scores are macro F0.5 per S1 entity, singletons included.
 | 0 | 09-25 03:40 | starter pipeline (TF-IDF top-K blocking, 2-stage LightGBM, expF rule) | 1% | 0.9853 | 0.9913 | 0.9762 | 0.9716 | 0.9862 | – | – | 20 min on a Mac | – |
 | 1 | 09-25 04:10 | partitioned rare-key blocking + global re-rank, K cut (34 pairs/S1) | 1% | 0.9851 | 0.9914 | 0.9755 | 0.9693 | 0.9860 | – | – | 3.4 min on a Mac | – |
 | 2 | 09-25 07:00 | crude no-ML baseline: 4 hash-join keys + token-set threshold (w=0.4, t=0.77), best S1 per candidate | full | 0.8309 | 0.8515 | 0.7999 | – | – | n/a (rule) | 0.823 (India/US only) | 21 min on a Mac | pending |
+| 2b | 09-27 01:37 | crude baseline re-run after the prep fork→spawn fix (same code) → `output_crude/` | full | 0.8309 | 0.8515 | 0.7999 | – | – | n/a (rule) | 0.823 (India/US only) | 6 min, 28-core Windows | – |
+| 3 | 09-27 02:49 | `match.py` step 1: SAME hash-key candidates (recall 0.808, oracle 0.904) + 54 pair features + LightGBM out-of-fold (5 folds, 30% S1 per model) + vectorised expected-F0.5 rule with one-to-one → `output_v1/` | full | 0.8907 | 0.9294 | 0.8328 | – | – | – | 0.876 (India/US only) | 21 min | – |
+| 4 | 09-27 03:41 | `match.py` step 2: hash keys ∪ word TF-IDF top-10 per S2/S3 (df ≤ 1%, sparse_dot_topn) → cascade pruner (99.7% of retrieved positives, 110M → 17.0M pairs) → 64 features → same LightGBM + rule. Recall 0.968 → 0.965, oracle 0.985 → `output_v2/` | full | 0.9540 | 0.9661 | 0.9358 | – | – | – | 0.949 (India/US only) | train ≈ 51 min, 28 cores | – |
 
 ## Step 0 data facts (full data)
 These are the full-data facts that drive the design. The raw examples are in `reports/`, which is gitignored.

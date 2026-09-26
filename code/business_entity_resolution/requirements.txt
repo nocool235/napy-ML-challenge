@@ -6,3 +6,5 @@ scikit-learn==1.8.0
 lightgbm==4.7.0
 rapidfuzz==3.14.6
 polars==1.44.2
+sparse_dot_topn==1.2.0
+faiss-cpu==1.15.1

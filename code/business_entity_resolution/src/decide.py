@@ -88,3 +88,86 @@ def apply(best: dict, i, j, p) -> np.ndarray:
     if best["rule"] == "thr":
         return rule_threshold(i, j, p, best["param"], best["o2o"])
     return rule_expected_f(i, j, p, best["param"], best["o2o"])
+
+
+# ------------------------------------------------------------------ vectorised versions (full scale)
+# Same rules as above, in numpy over millions of pairs: no per-S1 Python loops, no dicts of sets.
+# i / j are integer row indices (S1 / candidate); scores come from per_s1_f05 with bincount.
+
+def per_s1_f05(keep_i: np.ndarray, keep_y: np.ndarray, n_s1: int, n_true: np.ndarray) -> np.ndarray:
+    """Exact per-S1 F0.5 = 1.25 TP / (0.25 T + P); an empty prediction scores 1 iff T == 0.
+    n_true counts ALL true matches per S1, including ones retrieval never proposed."""
+    P = np.bincount(keep_i, minlength=n_s1)
+    TP = np.bincount(keep_i, weights=keep_y, minlength=n_s1)
+    return np.where(P + n_true == 0, 1.0, 1.25 * TP / np.maximum(0.25 * n_true + P, 1e-9))
+
+
+def o2o_mask(j: np.ndarray, p: np.ndarray) -> np.ndarray:
+    """True for exactly one pair per candidate j: the one with the highest p (S1 is deduplicated)."""
+    order = np.lexsort((-p, j))
+    first = np.ones(len(order), bool)
+    first[1:] = j[order][1:] != j[order][:-1]
+    m = np.zeros(len(p), bool)
+    m[order[first]] = True
+    return m
+
+
+def expf_mask(i: np.ndarray, p: np.ndarray, alpha: float = 1.0, elig: np.ndarray | None = None) -> np.ndarray:
+    """Per S1: the top-k eligible pairs maximising E[F0.5] ~ 1.25 sum_topk(q) / (0.25 sum(q) + k), taken
+    only if that beats E[empty] = prod(1 - q). q = p ** alpha."""
+    q = np.clip(p, 1e-6, 1 - 1e-6) ** alpha
+    elig = np.ones(len(p), bool) if elig is None else elig
+    qe = np.where(elig, q, 0.0)
+    order = np.lexsort((-qe, i))
+    i_s, q_s, qe_s, e_s = i[order], q[order], qe[order], elig[order]
+    starts = np.flatnonzero(np.r_[True, i_s[1:] != i_s[:-1]])
+    grp = np.repeat(np.arange(len(starts)), np.diff(np.r_[starts, len(i_s)]))
+    k = np.arange(len(i_s)) - starts[grp] + 1
+    cs = np.cumsum(qe_s)
+    cum = cs - (cs[starts] - qe_s[starts])[grp]
+    tot = np.add.reduceat(q_s, starts)[grp]
+    ef = np.where(e_s, 1.25 * cum / (0.25 * tot + k), -1.0)
+    gmax = np.maximum.reduceat(ef, starts)[grp]
+    kstar = np.minimum.reduceat(np.where(ef >= gmax - 1e-12, k, np.iinfo(np.int64).max), starts)[grp]
+    e0 = np.exp(np.add.reduceat(np.log1p(-q_s), starts))[grp]
+    m = np.zeros(len(p), bool)
+    m[order[(k <= kstar) & (gmax > e0) & e_s]] = True
+    return m
+
+
+def rule_mask(rule: dict, i: np.ndarray, j: np.ndarray, p: np.ndarray) -> np.ndarray:
+    elig = o2o_mask(j, p) if rule["o2o"] else np.ones(len(p), bool)
+    if rule["rule"] == "thr":
+        return elig & (p >= rule["param"])
+    return expf_mask(i, p, rule["param"], elig)
+
+
+def score_by_group(f: np.ndarray, s1_group: np.ndarray, weights: dict) -> dict:
+    """Mean F0.5 per group (e.g. country) and the weighted mix over the groups present in `weights`."""
+    out = {"all": float(f.mean())}
+    for g in np.unique(s1_group):
+        out[str(g)] = float(f[s1_group == g].mean())
+    present = [g for g in weights if g in out]
+    out["mix"] = sum(weights[g] * out[g] for g in present) / sum(weights[g] for g in present) if present else out["all"]
+    return out
+
+
+def tune_vec(i, j, p, y, n_true, s1_group, weights, verbose=True):
+    """Grid over both rules x one-to-one on/off; picks the rule with the best weighted-mix F0.5."""
+    n_s1 = len(n_true)
+    elig = {True: o2o_mask(j, p), False: np.ones(len(p), bool)}
+    rows = []
+
+    def add(rule, param, o2o, keep):
+        f = per_s1_f05(i[keep], y[keep], n_s1, n_true)
+        rows.append({"rule": rule, "param": param, "o2o": o2o, **score_by_group(f, s1_group, weights)})
+
+    for o2o in (True, False):
+        for t in THRESH_GRID:
+            add("thr", t, o2o, elig[o2o] & (p >= t))
+        for a in (0.5, 0.75, 1.0, 1.25, 1.5, 2.0, 3.0):
+            add("expF", a, o2o, expf_mask(i, p, a, elig[o2o]))
+    res = pd.DataFrame(rows).sort_values("mix", ascending=False)
+    if verbose:
+        print("[decide] top rules:\n" + res.head(8).to_string(index=False), flush=True)
+    return res.iloc[0].to_dict(), res
