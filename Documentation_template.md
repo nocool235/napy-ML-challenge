@@ -12,7 +12,7 @@ For every Source 1 business we find its Source 2 / Source 3 records with a retri
 1. **Normalise:** country-agnostic rules, including rule-based Indic-script transliteration and phonetic skeletons.
 2. **Retrieve:** capped hash-join keys, plus exact sparse TF-IDF top-k search inside each country on two views: name + address words, and name character n-grams.
 3. **Prune:** a LightGBM cascade pruner on retrieval-time features only. It cuts 178M retrieved train pairs to **6.2 per S1** (7.8 per S1 on test) and keeps 96.8% of all true pairs.
-4. **Classify:** a LightGBM + XGBoost blend on 102 pair features, then a second stage that adds 21 features built from the first stage's probabilities.
+4. **Classify:** XGBoost (GPU) trained on every train entity, on 102 pair features. A second stage adds 21 features built from the first stage's probabilities.
 5. **Decide:** a per-entity rule that maximises the expected F0.5 directly. It uses a one-to-one constraint and is tuned on a train rebuild that reproduces test's structure.
 
 Two findings mattered most. At full scale, **candidate recall, not the matcher**, was the first bottleneck (0.81 → 0.97). After that, the gap between out-of-fold and leaderboard scores came from how **test differs from train**. We measured two such differences without labels and corrected for them: records whose entity is missing from S1, and a lower house-number noise rate in the unseen country. Public leaderboard: 0.9365 → **0.958**.
@@ -114,14 +114,14 @@ Two findings mattered most. At full scale, **candidate recall, not the matcher**
 - **Context:** rank and gap-to-best of key scores within the S1's candidates and within the S1 records competing for the same candidate.
 
 **Model type:**
-- **Stage 1:** LightGBM (MIT; 127 leaves, learning rate 0.08, early stopping, CPU) and XGBoost (Apache-2.0; hist, GPU), blended 50/50 (the weight is chosen on out-of-fold log-loss).
-  - Training is 5 folds grouped by S1 entity over all train pairs.
-  - Each fold's models train on 30% of the other folds' entities, so out-of-fold predictions cover every entity and the one-to-one competition is intact.
-- **Stage 2:** the same blend with 21 more features computed from stage-1 probabilities:
+- **Stage 1:** XGBoost (Apache-2.0; hist, GPU, leaf-wise with 127 leaves, learning rate 0.08, early stopping on 10% of entities).
+  - Training is 5 folds grouped by S1 entity over all train pairs. Each fold's model trains on all the other folds' entities, so out-of-fold predictions cover every entity and the one-to-one competition is intact.
+  - Earlier versions blended LightGBM + XGBoost with each model seeing 30% of entities (a CPU-time constraint). Training XGBoost alone on 100% (3.3× the data) raised out-of-fold F0.5 on the same candidates by ≈ 0.002.
+- **Stage 2:** the same model type with 21 more features computed from stage-1 probabilities:
   - within the S1: rank, gap to best, runner-up, probability mass;
   - within the candidate: margin over the best competing S1;
   - agreement with the S1's other top candidates: name and address similarity, house-number and postcode agreement.
-  - It uses the same folds as stage 1 (out-of-fold probabilities, no leakage) and raised out-of-fold F0.5 from 0.968 to 0.975.
+  - It uses the same folds as stage 1 (out-of-fold probabilities, no leakage) and raised out-of-fold F0.5 from 0.969 to 0.975.
 
 **Threshold selection method:**
 - Macro F0.5 per entity is optimised directly, on out-of-fold probabilities for all 2.2M train entities. Every true match counts, including ones retrieval never found.
@@ -150,7 +150,7 @@ Two findings mattered most. At full scale, **candidate recall, not the matcher**
 | + de-noised features, LightGBM/XGBoost (v3) | 0.965 | 0.985 | 0.947 | 0.969 | 0.957 | 0.947 |
 | + char n-gram view, legal-form feature, stage 2 (v5) | 0.971 | 0.987 | 0.968 | 0.983 | 0.975 | 0.9526 |
 | + float64 rule, α 1.5, house-number correction | 0.971 | 0.987 | – | – | – | **0.958** |
-| **Final: + pruner cut 0.01 (27% fewer candidates)** | 0.968 | – | – | – | – | [TBD] |
+| **Final (v6): pruner cut 0.01 (27% fewer candidates), XGBoost on all entities, + stage 2, α 1.5, house-number correction** | 0.968 | 0.986 | 0.968 | 0.984 | 0.975 | [TBD] |
 
 - **Held-out check (India, 617k train entities the final models never saw):** 0.9683 at the 99.7% cut; the orphan rebuild costs 0.0018.
 - **What moved the leaderboard, and why:** v5's out-of-fold gain (+0.018) produced only +0.006 on the leaderboard. Solving the public score for the unseen country (weights 0.47 / 0.38 / 0.15) implied France had dropped. Two unlabelled statistics explained it:
@@ -188,9 +188,8 @@ Code is in `code/business_entity_resolution/src/`; exact commands are in `code/b
 | Stage | Command | Output |
 |---|---|---|
 | Normalise (once) | `python src/prep.py --data-dir <dataset> --work-dir <work>` | parquet cache |
-| Train, OOF, stage 2, test candidates | `python src/match.py --data-dir <dataset> --work-dir <work> --out-dir <run> --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2` | models, rule, OOF, cached test pairs |
-| Final candidate cut + scoring | `python src/predict_test.py --run-dir <run> --norm-dir <work>/norm-… --pair-cache <work>/pairs-… --feat-cache <work>/feat-… --prune-threshold 0.01 --out-dir <scored>` | `candidate_pairs.tsv`, test probabilities |
-| Decision + house-number correction | `python src/postprocess.py --run-dir <run> --probs-dir <scored> --norm-dir <work>/norm-… --out-dir output --rule expF:1.5 --house-lr <work>/feat-… --test-feat <scored>/cache/test_features.parquet` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` |
+| Train, OOF, stage 2, test outputs | `python src/match.py --data-dir <dataset> --work-dir <work> --out-dir <run> --tfidf-k 10 --char-k 8 --char-max-df 0.01 --prune-threshold 0.01 --models xgb --device cuda --train-frac 1.0 --stage2` | models, rule, OOF, test probabilities, `candidate_pairs.tsv` |
+| Decision + house-number correction | `python src/postprocess.py --run-dir <run> --norm-dir <work>/norm-… --out-dir output --rule expF:1.5 --house-lr <work>/feat-… --test-feat <work>/feat-…/test_features.parquet --house-lr-scale <S>` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` |
 
 - **Modules:**
   - `normalize.py`, `translit.py`, `prep.py`: normalisation;
@@ -199,7 +198,7 @@ Code is in `code/business_entity_resolution/src/`; exact commands are in `code/b
   - `match.py`: features, models, driver;
   - `stage2.py`;
   - `decide.py`, `metric.py`: decision rules and the exact metric;
-  - `predict_test.py`, `postprocess.py`;
+  - `postprocess.py`; `predict_test.py` (rescoring a finished run without training);
   - `build_token_maps.py`: optional, not used in the final run.
 - **Dependencies:** LightGBM (MIT), XGBoost (Apache-2.0), scikit-learn, rapidfuzz, polars, sparse_dot_topn. No external data, APIs, geocoding or pretrained models. XGBoost runs on CPU if no GPU is present.
 - **Reproducibility:** XGBoost's GPU training is not bit-for-bit deterministic, so a rerun reproduces the scores closely but not byte for byte.

@@ -59,7 +59,8 @@ def house_conflict_rate(feat: Path, probs: pl.DataFrame, ctry_of_i: np.ndarray, 
     bj = d.sort("p", descending=True).group_by("j", maintain_order=True).first().select("j", bi_="i")
     mb = (d.join(bi, on="i").filter(pl.col("j") == pl.col("bj")).join(bj, on="j").filter(pl.col("i") == pl.col("bi_"))
            .filter((pl.col("p") >= min_p) & (pl.col("hn_both") == 1)))
-    return {r[0]: float(r[1]) for r in mb.group_by("country").agg(pl.col("hn_conflict").mean()).iter_rows()}
+    return {r[0]: (float(r[1]), int(r[2]))
+            for r in mb.group_by("country").agg(pl.col("hn_conflict").mean(), pl.len()).iter_rows()}
 
 
 def main():
@@ -75,6 +76,9 @@ def main():
                     "pairs show house-number conflicts less often than any training country did, conflicts are "
                     "stronger evidence than the model learned; scale conflicting pairs' odds by that ratio")
     ap.add_argument("--test-feat", default="", help="test feature cache file (with --house-lr)")
+    ap.add_argument("--house-lr-scale", type=float, default=1.0,
+                    help="multiply the house-number odds factor where it applies (< 1 = stronger); the rate ratio is "
+                         "a conservative estimate since confident pairs under-count conflicts by 0.4-0.6x in train")
     ap.add_argument("--rule", default="", help="override the run's decision rule, e.g. expF:1.5 or thr:0.8 (one-to-one "
                                                "kept); one global rule for every record, chosen offline")
     a = ap.parse_args()
@@ -110,17 +114,20 @@ def main():
         s1tr = prep.load(Path(a.norm_dir), "train", ("source1",), ["country_norm"])["country_norm"].to_numpy()
         r_train = house_conflict_rate(Path(a.house_lr) / "train_features.parquet", oof, s1tr)
         r_test = house_conflict_rate(Path(a.test_feat), tp, s1["country_norm"].to_numpy())
-        floor = min(r_train.values())
+        MIN_N, LR_MIN = 1000, 0.05          # trust a rate only from >= 1000 confident pairs; never zero out
+        floor_c, (floor, _) = min(((c, v) for c, v in r_train.items() if v[1] >= MIN_N), key=lambda cv: cv[1][0])
         Fh = pl.read_parquet(a.test_feat, columns=["hn_conflict"])["hn_conflict"].to_numpy() == 1
         for c in np.unique(ctry):
-            lr = min(1.0, r_test.get(str(c), floor) / floor)
+            r_c, n_c = r_test.get(str(c), (floor, 0))
+            lr = 1.0 if n_c < MIN_N else min(1.0, r_c / floor)
+            lr = max(LR_MIN, lr * a.house_lr_scale) if lr < 1.0 else lr
             mk = (ctry == c) & Fh
             odds = q[mk].astype(np.float64) / np.clip(1 - q[mk].astype(np.float64), 1e-9, None) * lr
             q[mk] = (odds / (1 + odds)).astype(np.float32)
-            report.setdefault(str(c), {}).update({"house_conflict_rate": round(r_test.get(str(c), float("nan")), 4),
+            report.setdefault(str(c), {}).update({"house_conflict_rate": round(r_c, 4), "confident_pairs": n_c,
                                                   "house_lr": round(lr, 4)})
-            log(f"{c}: confident-pair house-conflict rate {r_test.get(str(c), float('nan')):.4f} vs lowest train "
-                f"{floor:.4f} ({min(r_train, key=r_train.get)}) -> odds x{lr:.3f} on {mk.sum():,} conflicting pairs")
+            log(f"{c}: confident-pair house-conflict rate {r_c:.4f} (n={n_c:,}) vs lowest train {floor:.4f} "
+                f"({floor_c}) -> odds x{lr:.3f} on {mk.sum():,} conflicting pairs")
     keep0, keep = decide.rule_mask(rule0, ti, tj, p), decide.rule_mask(rule, ti, tj, q)
     before, after = match.structure(s1, cand, ti[keep0], tj[keep0]), match.structure(s1, cand, ti[keep], tj[keep])
     for c in after:

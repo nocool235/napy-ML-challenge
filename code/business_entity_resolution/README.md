@@ -22,28 +22,28 @@ pip install -r requirements.txt
 # 1. normalise once (3-12 min on 28 cores; resumable: finished parts are skipped)
 python src/prep.py --data-dir ../../dataset --work-dir ../../work
 
-# 2. retrieval (hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8), cascade pruner, 102 pair
-#    features, LightGBM + XGBoost 5-fold out-of-fold, stage 2, test candidates and features (~3 h on 28 cores + GPU;
-#    --device cpu also works). Its first log line names the norm-/pairs-/feat- cache directories used below.
+# 2. retrieval (hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8), cascade pruner with the final
+#    stricter cut (pruner score >= 0.01: 7.8 candidates per S1 on test), 102 pair features, XGBoost on all train
+#    entities (5-fold out-of-fold), stage 2, test outputs (~2.5 h on 28 cores + GPU; --device cpu also works).
+#    Its first log line names the norm-/pairs-/feat- cache directories used in step 3.
 python src/match.py --data-dir ../../dataset --work-dir ../../work --out-dir ../../run \
-    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
+    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --prune-threshold 0.01 \
+    --models xgb --device cuda --train-frac 1.0 --stage2
 
-# 3. final candidate set: stricter cascade-pruner cut (7.8 candidates per S1 on test), then score it (~13 min)
-python src/predict_test.py --run-dir ../../run --norm-dir ../../work/norm-<key> --pair-cache ../../work/pairs-<key> \
-    --feat-cache ../../work/feat-<key> --prune-threshold 0.01 --out-dir ../../scored
+# 3. decision rule (expected-F0.5, one-to-one, alpha 1.5) + house-number likelihood correction (~1 min)
+python src/postprocess.py --run-dir ../../run --norm-dir ../../work/norm-<key> --out-dir ../../output \
+    --rule expF:1.5 --house-lr ../../work/feat-<key> --test-feat ../../work/feat-<key>/test_features.parquet \
+    --house-lr-scale <S>
 
-# 4. decision rule (expected-F0.5, one-to-one, alpha 1.5) + house-number likelihood correction (~1 min)
-python src/postprocess.py --run-dir ../../run --probs-dir ../../scored --norm-dir ../../work/norm-<key> \
-    --out-dir ../../output --rule expF:1.5 --house-lr ../../work/feat-<key> \
-    --test-feat ../../scored/cache/test_features.parquet
-
-# 5. check the files
+# 4. check the files
 python ../../utils/validate_submission.py --matching ../../output/matching_results.tsv \
     --candidate ../../output/candidate_pairs.tsv --test-dir ../../dataset/test
 ```
 
-Steps 3–4 are what produced the submitted files. `match.py` alone (step 2) also writes a complete submission
-into `run/`, using the run's own out-of-fold-tuned rule and the looser 99.7% pruner cut.
+Steps 2–3 produce the submitted files (`<S>` is the house-correction scale of the final submission; see
+`Documentation_template.md`). `match.py` alone also writes a complete submission into `run/`, with the run's own
+out-of-fold-tuned rule and no house-number correction. `predict_test.py` rescores test from a finished run without
+retraining (e.g. at a different pruner cut).
 
 On Windows, set `PYTHONIOENCODING=utf-8` first.
 
@@ -62,6 +62,8 @@ On Windows, set `PYTHONIOENCODING=utf-8` first.
 | `--tfidf-k` | 10 | word-view TF-IDF top-k per S2/S3 record. `0` means hash-join keys only (no pruner) |
 | `--char-k`, `--addr-k`, `--ns-char-k` | off | top-k for the extra retrieval views (name char n-grams, address words, no-space-name char n-grams); each independent, unioned onto the hash+word candidates |
 | `--prune-recall` | 0.997 | Share of retrieved true pairs the cascade pruner must keep |
+| `--prune-threshold` | 0 | Stricter pruner cut on top (keep pruner score ≥ this): a smaller candidate set. The final run uses 0.01 |
+| `--norm-dir`, `--pair-cache`, `--feat-cache` | derived | Use these cache directories instead of the derived names (e.g. after a normalisation code edit) |
 | `--models` | `lgb` | `lgb`, `xgb` or `lgb,xgb`. Two models are blended, with the weight chosen on out-of-fold log-loss |
 | `--device` | `cpu` | `cuda` runs XGBoost on a GPU (optional; not needed to reproduce) |
 | `--folds`, `--train-frac` | 5, 0.3 | Out-of-fold folds, and the share of train S1 records each model trains on |

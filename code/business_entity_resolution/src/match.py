@@ -281,7 +281,8 @@ EXTRA_VIEWS = {
 
 def candidates(s1: pl.DataFrame, cand: pl.DataFrame, split: str, pcache: Path, tfidf_k: int,
                gt: pl.DataFrame | None, prune_recall: float, use_cache: bool = True,
-               extra_k: dict[str, int] | None = None, extra_max_df: dict[str, float] | None = None) -> pl.DataFrame:
+               extra_k: dict[str, int] | None = None, extra_max_df: dict[str, float] | None = None,
+               prune_min: float = 0.0) -> pl.DataFrame:
     """Hash-join keys, plus (tfidf_k > 0) word TF-IDF top-k retrieval, plus any EXTRA_VIEWS with a positive
     k in `extra_k` (see EXTRA_VIEWS for what each catches). Then the cascade pruner. The pruner is fit on
     train (needs gt); pruner and pairs are saved in the pair cache, test loads the pruner."""
@@ -324,7 +325,7 @@ def candidates(s1: pl.DataFrame, cand: pl.DataFrame, split: str, pcache: Path, t
         else:
             pruner = cascade_pruner.Pruner.load(pcache)
         p = pruner.score(P)
-        keep = p >= pruner.threshold
+        keep = p >= max(pruner.threshold, prune_min)     # prune_min: a stricter cut -> smaller candidate set
         P = P.with_columns(p_prune=pl.Series(p)).filter(pl.Series(keep))
         if gt is not None:
             log(f"{split}: recall after pruning {y[keep].sum() / len(gt):.4f}")
@@ -342,7 +343,8 @@ def _write(df: pl.DataFrame, fp: Path):
 
 
 def build(norm: Path, split: str, pcache: Path, fcache: Path, use_cache: bool, tfidf_k: int, data_dir: Path,
-          prune_recall: float, extra_k: dict[str, int] | None = None, extra_max_df: dict[str, float] | None = None):
+          prune_recall: float, extra_k: dict[str, int] | None = None, extra_max_df: dict[str, float] | None = None,
+          prune_min: float = 0.0):
     """Load a split; candidate pairs and features each come from their own cache when present."""
     s1, cand = load(norm, split)
     fp = fcache / f"{split}_features.parquet"
@@ -350,7 +352,7 @@ def build(norm: Path, split: str, pcache: Path, fcache: Path, use_cache: bool, t
         log(f"{split}: loading cached features {fp}")
         return s1, cand, pl.read_parquet(fp)
     gt = load_truth(data_dir, s1, cand) if split == "train" else None
-    pairs = candidates(s1, cand, split, pcache, tfidf_k, gt, prune_recall, use_cache, extra_k, extra_max_df)
+    pairs = candidates(s1, cand, split, pcache, tfidf_k, gt, prune_recall, use_cache, extra_k, extra_max_df, prune_min)
     F = pair_features(pairs, s1, cand)
     _write(F, fp)
     return s1, cand, F
@@ -361,14 +363,15 @@ def _key(s: str) -> str:
 
 
 def cache_dirs(work: Path, norm: Path, tfidf_k: int, prune_recall: float, extra_k: dict[str, int] | None = None,
-               extra_max_df: dict[str, float] | None = None) -> tuple[Path, Path]:
+               extra_max_df: dict[str, float] | None = None, prune_min: float = 0.0) -> tuple[Path, Path]:
     """Cache names from explicit versions + every setting that changes the output. Versions are bumped by
     hand when behaviour changes (RETRIEVAL_VERSION, PRUNER_VERSION, FEATURE_VERSION); hashing function source
     instead invalidated valid caches whenever a default-preserving parameter was added."""
     extra_k, extra_max_df = extra_k or {}, extra_max_df or {}
     extras = "|".join(f"{s}k{extra_k.get(s, 0)}df{extra_max_df.get(s, 0.01)}" for s in sorted(EXTRA_VIEWS))
     pair_key = _key(f"{retrieval.RETRIEVAL_VERSION}|{cascade_pruner.PRUNER_VERSION}|{norm.name}|k{tfidf_k}|"
-                    f"r{prune_recall}|{retrieval.HASH_CAP_S1},{retrieval.HASH_CAP_C}|{extras}")
+                    f"r{prune_recall}|{retrieval.HASH_CAP_S1},{retrieval.HASH_CAP_C}|{extras}"
+                    + (f"|pmin{prune_min}" if prune_min else ""))
     feat_key = _key(f"{pair_key}|{FEATURE_VERSION}|{COLS}|{[f[:2] for f in STRING_FEATURES]}|"
                     f"{[f[:3] for f in CROSS_FEATURES]}|{PAIR_TFIDF}|{CONTEXT_COLS}|{RETRIEVAL_COLS}|"
                     f"{NOISE_MIN_RATE}|{NOISE_RATIO}")
@@ -553,6 +556,9 @@ def main():
                     help="share of train S1 records each model trains on (OOF still covers every S1)")
     ap.add_argument("--tfidf-k", type=int, default=10,
                     help="TF-IDF top-k S1 per S2/S3 record, unioned with hash keys, then pruned; 0 = hash keys only")
+    ap.add_argument("--prune-threshold", type=float, default=0.0,
+                    help="stricter cascade-pruner cut on top of --prune-recall (keep pruner score >= this): a smaller "
+                         "candidate set per S1. The final runs use 0.01 (7.8 candidates per S1 on test, -27%%)")
     ap.add_argument("--prune-recall", type=float, default=0.997,
                     help="share of retrieved true pairs the cascade pruner must keep (train holdout)")
     ap.add_argument("--char-k", type=int, default=0,
@@ -575,6 +581,9 @@ def main():
     ap.add_argument("--stage2", action="store_true",
                     help="second-stage model on stage-1 OOF probabilities + sibling agreement (kept only if OOF improves)")
     ap.add_argument("--validate-only", action="store_true", help="train + OOF only, no test outputs")
+    ap.add_argument("--norm-dir", default="", help="use this normalisation cache instead of the one prep.py derives")
+    ap.add_argument("--pair-cache", default="", help="use this pairs-<key> dir instead of the derived one")
+    ap.add_argument("--feat-cache", default="", help="use this feat-<key> dir instead of the derived one")
     ap.add_argument("--cv", choices=["group", "country"], default="group",
                     help="country = leave-one-country-out (train on one country, score the other): the France proxy")
     a = ap.parse_args()
@@ -586,17 +595,20 @@ def main():
     data_dir, out = Path(a.data_dir), Path(a.out_dir)
     dbg = out / "debug"
     dbg.mkdir(parents=True, exist_ok=True)
-    norm = prep.norm_dir(Path(a.work_dir))
+    norm = Path(a.norm_dir) if a.norm_dir else prep.norm_dir(Path(a.work_dir))
     extra_k = {"char": a.char_k, "addr": a.addr_k, "ns": a.ns_char_k}
     extra_max_df = {"char": a.char_max_df, "addr": a.addr_max_df, "ns": a.ns_char_max_df}
-    pcache, fcache = cache_dirs(Path(a.work_dir), norm, a.tfidf_k, a.prune_recall, extra_k, extra_max_df)
+    pcache, fcache = cache_dirs(Path(a.work_dir), norm, a.tfidf_k, a.prune_recall, extra_k, extra_max_df,
+                                a.prune_threshold)
+    pcache = Path(a.pair_cache) if a.pair_cache else pcache
+    fcache = Path(a.feat_cache) if a.feat_cache else fcache
     use_cache = not a.no_cache
     log(f"models {kinds} (xgb device {a.device}); norm {norm}; pair cache {pcache}; feature cache {fcache}; "
         f"extra views k={extra_k}")
 
     # ---------------- train
     s1, cand, F = build(norm, "train", pcache, fcache, use_cache, a.tfidf_k, data_dir, a.prune_recall,
-                        extra_k, extra_max_df)
+                        extra_k, extra_max_df, a.prune_threshold)
     gt = load_truth(data_dir, s1, cand)
     n_true = np.bincount(gt["i"].to_numpy(), minlength=len(s1))
     F = F.join(gt.with_columns(y=pl.lit(1, pl.Int8)), on=["i", "j"], how="left").with_columns(pl.col("y").fill_null(0))
@@ -678,7 +690,7 @@ def main():
 
     # ---------------- test
     s1, cand, F = build(norm, "test", pcache, fcache, use_cache, a.tfidf_k, data_dir, a.prune_recall,
-                        extra_k, extra_max_df)
+                        extra_k, extra_max_df, a.prune_threshold)
     ti, tj = F["i"].to_numpy(), F["j"].to_numpy()
     Xt = F.select(pl.col(cols).cast(pl.Float32)).to_numpy()
     del F
