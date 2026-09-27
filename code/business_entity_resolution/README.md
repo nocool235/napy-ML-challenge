@@ -29,9 +29,9 @@ python src/prep.py --data-dir ../../dataset --work-dir ../../work
 python src/match.py --data-dir ../../dataset --work-dir ../../work --out-dir ../../run \
     --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
 
-# 3. decision rule (expected-F0.5, one-to-one, alpha 1.5) + house-number likelihood correction (~1 min)
+# 3. decision rule (expected-F0.5, one-to-one, alpha 2.0) + house-number likelihood correction (~1 min)
 python src/postprocess.py --run-dir ../../run --norm-dir ../../work/norm-<key> --out-dir ../../output \
-    --rule expF:1.5 --house-lr ../../work/feat-<key> --test-feat ../../work/feat-<key>/test_features.parquet
+    --rule expF:2.0 --house-lr ../../work/feat-<key> --test-feat ../../work/feat-<key>/test_features.parquet
 
 # 4. check the files
 python ../../utils/validate_submission.py --matching ../../output/matching_results.tsv \
