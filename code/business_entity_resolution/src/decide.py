@@ -171,3 +171,32 @@ def tune_vec(i, j, p, y, n_true, s1_group, weights, verbose=True):
     if verbose:
         print("[decide] top rules:\n" + res.head(8).to_string(index=False), flush=True)
     return res.iloc[0].to_dict(), res
+
+
+def tune_robust(table_groupcv: pd.DataFrame, table_loco: pd.DataFrame, france_weight: float = 0.15,
+                loco_countries: tuple[str, ...] = ("india", "us"), verbose: bool = True):
+    """Pick ONE rule, applied to every test record regardless of country (never a per-country branch -
+    the rules explicitly forbid that). `table_groupcv` is a normal tune_vec() grid (in-distribution score
+    for India/US, since those countries are seen in training). `table_loco` is a tune_vec() grid computed
+    on leave-one-country-out OOF (train on one of `loco_countries`, score the other) - our only proxy for
+    an unseen country like France. Its mean across `loco_countries` stands in for the France score a
+    candidate rule would get. robust_score blends the two exactly as the real test country mix does:
+    (1 - france_weight) x in-distribution mix + france_weight x LOCO-mean proxy for the unseen country.
+    A rule tuned on group-CV alone can look great in-distribution while being a poor bet on a country the
+    model has never seen (this is why stage 2 needed this check, not just its own group-CV score)."""
+    loco = table_loco.copy()
+    loco["loco_mean"] = loco[list(loco_countries)].mean(axis=1)
+    m = table_groupcv.merge(loco[["rule", "param", "o2o", "loco_mean"]], on=["rule", "param", "o2o"], how="inner")
+    if m.empty:
+        raise ValueError("no (rule, param, o2o) rows in common between the two grids")
+    m["robust_score"] = (1 - france_weight) * m["mix"] + france_weight * m["loco_mean"]
+    m = m.sort_values("robust_score", ascending=False)
+    if verbose:
+        cols = ["rule", "param", "o2o", "mix", "loco_mean", "robust_score"]
+        print("[decide] top rules by robust score:\n" + m[cols].head(8).to_string(index=False), flush=True)
+        top_groupcv = table_groupcv.sort_values("mix", ascending=False).iloc[0]
+        if (top_groupcv["rule"], top_groupcv["param"], top_groupcv["o2o"]) != tuple(m.iloc[0][["rule", "param", "o2o"]]):
+            print(f"[decide] robust choice differs from the group-CV-only best "
+                  f"({top_groupcv['rule']} {top_groupcv['param']} o2o={top_groupcv['o2o']}, "
+                  f"mix={top_groupcv['mix']:.4f}) - chose the more France-robust rule instead", flush=True)
+    return m.iloc[0].to_dict(), m

@@ -1,0 +1,3 @@
+upload	date_ist	output_dir	commit	oof_test_mix_india_us	public_lb	rank	notes
+1	2026-09-27 ~04:15	output_v2	6b63f60	0.9493	0.936459	1974	match.py step 2: hash keys + TF-IDF top-10 + pruner, 64 features, LightGBM, expected-F0.5 rule
+2	2026-09-27 ~05:30	output_v3	[TBD: next commit]	0.9571	0.947	[TBD]	f4 de-noised features (source-noise detection), LightGBM only (blend didn't clear bar)

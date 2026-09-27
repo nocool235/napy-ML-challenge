@@ -41,9 +41,16 @@ python code/business_entity_resolution/src/prep.py --data-dir dataset --work-dir
 
 # 2. main pipeline: train OOF + test outputs (step 2 settings are the defaults)
 python code/business_entity_resolution/src/match.py --data-dir dataset --work-dir cache/real_prep --out-dir output
-#    --tfidf-k 0        hash keys only (the step-1 run)
-#    --prune-recall R   share of retrieved true pairs the pruner keeps (default 0.997)
-#    --validate-only    train + OOF only;  --resume  reuse cached features
+#    --tfidf-k 0          hash keys only (the step-1 run)
+#    --char-k/--addr-k/--ns-char-k   extra retrieval views (name char n-grams / addr words / no-space name), off by default
+#    --prune-recall R     share of retrieved true pairs the pruner keeps (default 0.997)
+#    --models lgb,xgb     also train XGBoost and blend (needs `pip install xgboost`)
+#    --device cuda        run XGBoost on the GPU (CPU is the default)
+#    --stage2             second-stage model (kept only if OOF improves; NOT validated on LOCO, see EXPERIMENTS.md)
+#    --cv country         leave-one-country-out France proxy (no test outputs)
+#    --validate-only      train + OOF only;  --no-cache  recompute pairs and features
+# pairs and features are cached under cache/real_prep/pairs-*/ and feat-*/, keyed on hand-bumped version
+# constants (not a source hash) plus config, and reused automatically
 
 # 3. validate, then package
 python utils/validate_submission.py --matching output/matching_results.tsv \
@@ -63,7 +70,8 @@ code/business_entity_resolution/src/
   prep.py, normalize.py, translit.py, utils.py   normalisation → parquet cache
   retrieval.py        hash-join + TF-IDF candidates (plus experimental FAISS ANN, unused)
   cascade_pruner.py   trained candidate pruner
-  match.py            MAIN pipeline driver: features, LightGBM OOF, decision, outputs
+  match.py            MAIN pipeline driver: features, LightGBM/XGBoost OOF + blend, decision, outputs
+  stage2.py           second-stage features over stage-1 probabilities (--stage2)
   decide.py, metric.py   decision rules (dict-based + vectorised) and the exact metric
   run.py, blocking.py, features.py, model.py, config.py   legacy sample-scale pipeline
   synthetic.py        dev-only fake data
@@ -91,7 +99,9 @@ runs on France unchanged.
 ## Changelog (this session)
 | Time (IST) | Change |
 |---|---|
+| 09-27 ~16:40 | f5 legal-conflict feature, generalised `EXTRA_VIEWS` retrieval (char/addr/name-no-space, each configurable), `decide.tune_robust` (picks one rule robust to an unseen country — never a per-country branch), version-keyed caching (fixed a critical cache-invalidation bug), B15 normalisation fixes shipped for real, stage2 found NOT to transfer via LOCO (not shipped). `output_v5` (all of the above + stage2) running. Full state in `submission_log.tsv`, `EXPERIMENTS.md`, `ARCHITECTURE.md`. |
 | 09-27 ~01:20 | Rewrote this README from a stub; created `ARCHITECTURE.md`. |
 | 09-27 01:37 | Crude baseline re-run → `output_crude/`. |
+| 09-27 ~04:20 | Added GPU XGBoost + blending, split pair/feature caches, feature batch f3, `stage2.py`. v2b and v3 runs in progress. |
 | 09-27 03:41 | Step 2 OOF 0.949 (India 0.936, US 0.966); next steps are in `ARCHITECTURE.md` §7. |
 | 09-27 ~02:50 | New main pipeline `match.py` (+ `retrieval.hash_candidates`, vectorised `decide.py`). Step 1 → `output_v1/` (0.876, validator PASS). TF-IDF retrieval + trained pruner added; step 2 running → `output_v2/`. Pinned sparse_dot_topn and faiss-cpu. |

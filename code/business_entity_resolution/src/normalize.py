@@ -125,7 +125,7 @@ ADDR_CANON = {
     "circle": "cir", "cir": "cir",
     "terrace": "ter", "ter": "ter",
     "suite": "ste", "ste": "ste", "sainte": "ste", "unit": "ste",
-    "apartment": "apt", "apt": "apt", "flat": "apt",
+    "apartment": "apt", "apt": "apt", "flat": "apt", "appartement": "apt",
     "building": "bldg", "bldg": "bldg", "bld": "bldg", "batiment": "bldg", "bat": "bldg",
     "floor": "flr", "flr": "flr", "fl": "flr", "etage": "flr",
     "near": "near", "nr": "near", "nar": "near",
@@ -152,8 +152,8 @@ ADDR_CANON = {
     "route": "rte", "rte": "rte",
     "faubourg": "fbg", "fbg": "fbg",
     "rue": "rue", "r": "rue",
-    "quai": "quai", "qu": "quai",
-    "cours": "crs",
+    "quai": "quai", "qu": "quai", "q": "quai",
+    "cours": "cross",
     "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
     "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10",
     "premier": "1", "premiere": "1", "deuxieme": "2", "troisieme": "3",
@@ -215,6 +215,10 @@ PHRASES = {
     "bombay": "mumbai", "calcutta": "kolkata", "madras": "chennai", "bengaluru": "bangalore",
     "gurugram": "gurgaon", "poona": "pune", "mysuru": "mysore",
     "mahatma gandhi": "mg", "m g": "mg",
+    # short administrative codes one source uses that the state-name map above doesn't catch
+    "dl": "delhi", "tg": "ts",
+    # native-language romanisations of state names (a different source writes these than the English form)
+    "tamizhnatu": "tn", "keralam": "kl", "pashchimabang": "wb",
     # FR
     "cedex": "",
 }
@@ -229,6 +233,9 @@ _MS_RE = re.compile(r"(?i)\b(m\s*/\s*s|messrs)\b\.?")
 _HANDLE_RE = re.compile(r"(^|\s)@(?=\w)")
 _CO_RE = re.compile(r"(?i)\bc\s*/\s*o\b")
 _HNO_RE = re.compile(r"\b(h|d|hno|dno)\s*no\b")
+# French house-number marker ("N° 8"). Stripped on raw text: basic_clean drops the degree sign as
+# punctuation, which otherwise leaves a bare "n" token indistinguishable from north -> n.
+_NDEG_RE = re.compile(r"(?i)\bn\s*°\s*")
 _BIS_RE = re.compile(r"\b(\d+)\s*(bis|ter|quater)\b")
 _LEET = str.maketrans("013458", "oleasb")
 
@@ -356,7 +363,7 @@ def addr_fields(raw) -> dict:
     ind = bool(INDIC_RE.search(raw))
     if ind:
         raw = _translit_words(raw, "addr")
-    raw = _CO_RE.sub(" ", raw)
+    raw = _NDEG_RE.sub(" ", _CO_RE.sub(" ", raw))
     comps = re.split(r"[,;]", raw)
     comps = [FR_ADMIN.get(_admin_key(c), c) for c in comps]
     raw = ", ".join(comps)

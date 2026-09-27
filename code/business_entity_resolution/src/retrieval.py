@@ -18,6 +18,9 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 
 # ---------------------------------------------------------------- full-scale hash-join candidates (polars)
 # Key types, bit i of `kbits` set when key type i produced the pair. Every key is scoped by country_norm.
+# Bump when candidate generation changes what it returns (keys, caps, TF-IDF view settings). It names the
+# pair cache in match.py, so a bump forces retrieval to rerun; refactors that keep the output don't need one.
+RETRIEVAL_VERSION = "r1"
 HASH_KEY_TYPES = ("name", "street", "hskel", "skel")
 HASH_CAP_S1 = 5     # key groups with more S1 records than this are dropped (chains / generic names)
 HASH_CAP_C = 50     # ... or with more S2/S3 records than this
@@ -61,20 +64,24 @@ def _hash_keys(df: pl.DataFrame, idx: str, rare: pl.DataFrame) -> pl.DataFrame:
 
 def tfidf_candidates(s1: pl.DataFrame, cand: pl.DataFrame, col: str = "name_addr", k: int = 5,
                      max_df: float = 0.01, threads: int = 0, chunk: int = 250_000,
+                     analyzer: str = "word", ngram_range: tuple[int, int] = (1, 1),
                      extra: pl.DataFrame | None = None, log=print) -> pl.DataFrame:
     """Exact sparse top-k retrieval, S2/S3 -> S1, inside each country.
 
-    Word TF-IDF on `col`; tokens in more than `max_df` of the country's records are dropped (they cost the
+    TF-IDF on `col` (`analyzer`/`ngram_range`: "word" for token overlap, "char_wb" for typo/spelling-drift
+    tolerant n-grams); tokens in more than `max_df` of the country's records are dropped (they cost the
     most in the sparse product and discriminate least) and tokens seen once are dropped (they can't match).
     For each S2/S3 record, its k most similar S1 records (sparse_dot_topn, multi-threaded).
-    `extra` (i, j) pairs - e.g. the hash-join candidates - are scored with the same cosine, so every pair
-    carries the same retrieval features. Returns (i, j, tf_cos, tf_rank); tf_rank is the S1's rank for that
+    `extra` (i, j) pairs - e.g. the hash-join candidates, or another view's output - are scored with the
+    same cosine, so calling this again with `extra` set to a prior call's output unions the two views and
+    gives every pair both views' scores. Returns (i, j, tf_cos, tf_rank); tf_rank is the S1's rank for that
     candidate, k + 1 when the pair only came from `extra`."""
     import os
     import time
 
     from sparse_dot_topn import sp_matmul_topn
 
+    kw = {"token_pattern": r"[^ |]+"} if analyzer == "word" else {}
     threads = threads or os.cpu_count() or 1
     ctry1, ctryc = s1["country_norm"].to_numpy(), cand["country_norm"].to_numpy()
     local_i = np.full(len(s1), -1, np.int64)
@@ -84,8 +91,8 @@ def tfidf_candidates(s1: pl.DataFrame, cand: pl.DataFrame, col: str = "name_addr
         t0 = time.time()
         gi, gj = np.flatnonzero(ctry1 == c), np.flatnonzero(ctryc == c)
         local_i[gi], local_j[gj] = np.arange(len(gi)), np.arange(len(gj))
-        vec = TfidfVectorizer(analyzer="word", token_pattern=r"[^ |]+", sublinear_tf=True, dtype=np.float32,
-                              min_df=2, max_df=max_df)
+        vec = TfidfVectorizer(analyzer=analyzer, ngram_range=ngram_range, sublinear_tf=True, dtype=np.float32,
+                              min_df=2, max_df=max_df, **kw)
         X = vec.fit_transform(s1[col].gather(gi).to_list() + cand[col].gather(gj).to_list()).tocsr()
         vec.stop_words_ = None          # sklearn keeps every pruned token; not needed, can be millions
         X1, XC = X[:len(gi)], X[len(gi):]
@@ -116,6 +123,36 @@ def tfidf_candidates(s1: pl.DataFrame, cand: pl.DataFrame, col: str = "name_addr
              .with_columns(tf_rank=pl.when(pl.col("tf_rank") == 0).then(k + 1).otherwise(pl.col("tf_rank"))
                                      .cast(pl.UInt8)))
     return out.sort("i", "j")
+
+
+def tfidf_pair_cosine(s1: pl.DataFrame, cand: pl.DataFrame, pairs: pl.DataFrame, col: str,
+                      analyzer: str = "word", ngram: tuple[int, int] = (1, 1), min_df: int = 2,
+                      chunk: int = 2_000_000) -> np.ndarray:
+    """TF-IDF cosine of `col` between the two sides of each given pair (i, j). The vectoriser is fit per
+    country on that country's S1 + S2/S3 text (unsupervised, no labels), so a shared rare token counts for
+    much more than a shared common one. Scores only the given pairs; no top-k search."""
+    kw = {"token_pattern": r"[^ |]+"} if analyzer == "word" else {}
+    ctry1, ctryc = s1["country_norm"].to_numpy(), cand["country_norm"].to_numpy()
+    pi, pj = pairs["i"].to_numpy(), pairs["j"].to_numpy()
+    pc = ctry1[pi]
+    local_i = np.full(len(s1), -1, np.int64)
+    local_j = np.full(len(cand), -1, np.int64)
+    out = np.zeros(len(pi), np.float32)
+    for c in np.unique(pc):
+        gi, gj = np.flatnonzero(ctry1 == c), np.flatnonzero(ctryc == c)
+        local_i[gi], local_j[gj] = np.arange(len(gi)), np.arange(len(gj))
+        vec = TfidfVectorizer(analyzer=analyzer, ngram_range=ngram, sublinear_tf=True, dtype=np.float32,
+                              min_df=min_df, **kw)
+        X = vec.fit_transform(s1[col].gather(gi).to_list() + cand[col].gather(gj).to_list()).tocsr()
+        vec.stop_words_ = None
+        X1, XC = X[:len(gi)], X[len(gi):]
+        rows = np.flatnonzero(pc == c)
+        li, lj = local_i[pi[rows]], local_j[pj[rows]]
+        for s in range(0, len(rows), chunk):
+            out[rows[s:s + chunk]] = np.asarray(
+                X1[li[s:s + chunk]].multiply(XC[lj[s:s + chunk]]).sum(axis=1)).ravel()
+        del X, X1, XC
+    return out
 
 
 def hash_candidates(s1: pl.DataFrame, cand: pl.DataFrame, cap_s1: int = HASH_CAP_S1,
