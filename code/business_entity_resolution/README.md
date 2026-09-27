@@ -19,16 +19,31 @@ Python 3.11 or later. Run everything from this folder. The organisers' `dataset/
 ```bash
 pip install -r requirements.txt
 
-# 1. normalise once (~12 min on 28 cores; resumable: finished parts are skipped)
+# 1. normalise once (3-12 min on 28 cores; resumable: finished parts are skipped)
 python src/prep.py --data-dir ../../dataset --work-dir ../../work
 
-# 2. retrieval, pruner, features, model, decision, outputs (~70 min on 28 cores)
-python src/match.py --data-dir ../../dataset --work-dir ../../work --out-dir ../../output
+# 2. retrieval (hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8), cascade pruner, 102 pair
+#    features, LightGBM + XGBoost 5-fold out-of-fold, stage 2, test candidates and features (~3 h on 28 cores + GPU;
+#    --device cpu also works). Its first log line names the norm-/pairs-/feat- cache directories used below.
+python src/match.py --data-dir ../../dataset --work-dir ../../work --out-dir ../../run \
+    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
 
-# 3. check the files
+# 3. final candidate set: stricter cascade-pruner cut (7.8 candidates per S1 on test), then score it (~13 min)
+python src/predict_test.py --run-dir ../../run --norm-dir ../../work/norm-<key> --pair-cache ../../work/pairs-<key> \
+    --feat-cache ../../work/feat-<key> --prune-threshold 0.01 --out-dir ../../scored
+
+# 4. decision rule (expected-F0.5, one-to-one, alpha 1.5) + house-number likelihood correction (~1 min)
+python src/postprocess.py --run-dir ../../run --probs-dir ../../scored --norm-dir ../../work/norm-<key> \
+    --out-dir ../../output --rule expF:1.5 --house-lr ../../work/feat-<key> \
+    --test-feat ../../scored/cache/test_features.parquet
+
+# 5. check the files
 python ../../utils/validate_submission.py --matching ../../output/matching_results.tsv \
     --candidate ../../output/candidate_pairs.tsv --test-dir ../../dataset/test
 ```
+
+Steps 3–4 are what produced the submitted files. `match.py` alone (step 2) also writes a complete submission
+into `run/`, using the run's own out-of-fold-tuned rule and the looser 99.7% pruner cut.
 
 On Windows, set `PYTHONIOENCODING=utf-8` first.
 
@@ -78,9 +93,11 @@ feature set automatically.
 | `build_token_maps.py` | Optional token maps for normalisation: glued-word splits (unsupervised) and label-mined spellings |
 | `decide.py`, `metric.py` | Vectorised decision rules and the exact competition metric |
 | `utils.py` | Logging with ETA, hashing, TSV reading |
+| `run.py`, `blocking.py`, `features.py`, `model.py`, `config.py` | **Legacy, not used by the final pipeline:** the earlier sample-scale prototype, kept for reference |
 
 ## Rule compliance
 - No external data, APIs or geocoding. Every dictionary is hand-written in `normalize.py` / `translit.py`, and the phonetic-skeleton maps are learned from train Source 1 only.
 - TF-IDF vectorisers and source-noise token lists are fit on the provided records without labels.
 - Models: LightGBM (MIT); optional XGBoost (Apache-2.0). String metrics: rapidfuzz (MIT). Sparse top-k: sparse_dot_topn (Apache-2.0). No pretrained model; everything runs on CPU.
 - Country is treated as an open set of labels. It only scopes retrieval and statistics to same-country records; no rule or feature branches on a specific country, so France runs through unchanged.
+- Per-country statistics are computed the same way for every country, from unlabelled data. They are the TF-IDF vocabularies, the source-noise tokens and, in `postprocess.py --house-lr`, the house-number conflict rate among confident pairs. `--house-lr` only acts where a country's rate is below every training country's, which here happens to be France; it never names a country.

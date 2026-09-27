@@ -50,6 +50,8 @@ def main():
                     help="remove this share of S1 records but keep all S2/S3 (their records become orphans, as in test: "
                          "5.75 S2/S3 per S1 vs train's 4.68 = train with ~20%% of S1 removed)")
     ap.add_argument("--rule-grid", action="store_true", help="also score a grid of decision rules on the same p")
+    ap.add_argument("--prune-threshold", type=float, default=0.0,
+                    help="stricter pruner cut on the run's cached train pairs (features rebuilt on the smaller set)")
     ap.add_argument("--out", default="")
     a = ap.parse_args()
     t0 = time.time()
@@ -87,6 +89,15 @@ def main():
                                  extra_k, extra_max_df)
         F = match.pair_features(pairs, s1, cand)
         del pairs
+    elif a.prune_threshold:
+        keep_i = s1.filter(pl.col("country_norm").is_in(countries))["i"]
+        pairs = (pl.scan_parquet(Path(a.pair_cache) / "train_pairs.parquet")
+                   .filter(pl.col("i").is_in(keep_i.implode()) & (pl.col("p_prune") >= a.prune_threshold)).collect())
+        log(f"cached train pairs with p_prune >= {a.prune_threshold}: {len(pairs):,}")
+        F = match.pair_features(pairs, s1, cand)
+        del pairs
+        gt = gt_full.filter(pl.col("i").is_in(keep_i.implode()))
+        holdout = holdout_full
     else:
         keep_i = s1.filter(pl.col("country_norm").is_in(countries))["i"]
         F = pl.scan_parquet(Path(a.feat_cache) / "train_features.parquet").filter(

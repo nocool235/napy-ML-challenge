@@ -8,14 +8,14 @@
 
 ## 1. Executive Summary
 
-We match every Source 1 business to its Source 2 / Source 3 records with a retrieve–prune–classify–decide pipeline.
+For every Source 1 business we find its Source 2 / Source 3 records with a retrieve → prune → classify → decide pipeline.
 1. **Normalise:** country-agnostic rules, including rule-based Indic-script transliteration and phonetic skeletons.
-2. **Retrieve:** capped hash-join keys, unioned with exact sparse TF-IDF top-10 search inside each country.
-3. **Prune:** a LightGBM cascade pruner cuts the candidate pairs 6.5× while keeping 99.7% of the true pairs retrieval found.
-4. **Classify:** LightGBM (optionally blended with XGBoost) scores the surviving pairs on ~90 features.
-5. **Decide:** a per-entity decision rule maximises the expected macro F0.5 directly.
+2. **Retrieve:** capped hash-join keys, plus exact sparse TF-IDF top-k search inside each country on two views: name + address words, and name character n-grams.
+3. **Prune:** a LightGBM cascade pruner on retrieval-time features only. It cuts 178M retrieved train pairs to **6.2 per S1** (7.8 per S1 on test) and keeps 96.8% of all true pairs.
+4. **Classify:** a LightGBM + XGBoost blend on 102 pair features, then a second stage that adds 21 features built from the first stage's probabilities.
+5. **Decide:** a per-entity rule that maximises the expected F0.5 directly. It uses a one-to-one constraint and is tuned on a train rebuild that reproduces test's structure.
 
-The key finding was that at full scale, candidate recall rather than the matcher was the binding constraint. Raising it from 0.81 to 0.965 lifted our out-of-fold F0.5 from 0.876 to 0.949.
+Two findings mattered most. At full scale, **candidate recall, not the matcher**, was the first bottleneck (0.81 → 0.97). After that, the gap between out-of-fold and leaderboard scores came from how **test differs from train**. We measured two such differences without labels and corrected for them: records whose entity is missing from S1, and a lower house-number noise rate in the unseen country. Public leaderboard: 0.9365 → **0.958**.
 
 ---
 
@@ -23,144 +23,159 @@ The key finding was that at full scale, candidate recall rather than the matcher
 
 ### 2.1 Problem Analysis
 
-- **Scale.** Train has 2.21M S1 and 10.32M S2+S3 records; test has 1.73M S1 and 9.97M S2+S3. Comparing every S1 with every candidate would mean ≈17 trillion pairs on test, and ≈6.7 trillion even within the same country.
+- **Scale.** Train has 2.21M S1 and 10.32M S2+S3 records; test has 1.73M S1 and 9.97M S2+S3. Within-country all-pairs on test is ≈ 6.7 × 10¹² pairs.
 - **Structure (train).** 5.6% of S1 are singletons, with 3.46 true matches per S1 on average. No S2/S3 record belongs to two S1 records (checked over 7.64M true pairs), and no true pair crosses countries.
-- **Country shift.** Train is US and India. Test adds France (15% of S1), which has no labels.
+- **Test differs from train in two measurable ways:**
+  - **Orphan records.** Test has 5.75 S2/S3 records per S1 against 4.68 in train. Train with ≈ 20% of its S1 records removed reproduces both that ratio (5.85) and test's ≈ 40% share of records that match nothing. Those records' businesses are simply absent from S1, and the best remaining S1 is a wrong one.
+  - **France is unlabelled** (15% of test S1) and its record generator is noisier in some fields and cleaner in others; see §2.2 item 5.
 - **Noise we had to handle:**
   - abbreviations and legal-form variants (Pvt/Private, SARL/SAS/EURL);
   - DBA and trade names;
-  - word-order changes and typos;
+  - word order and typos, including glued words ("nantesclub");
   - landmark-style Indian addresses ("Near SBI ATM");
-  - postcodes are rare: in ~10% of US addresses and ~1% of India and France addresses;
-  - **Indic script:** 23.5% of S2 and 13.2% of S3 India names.
-- **Source-added tokens** (found during error analysis). Each source systematically adds words the others do not use:
-  - France: S2/S3 append "Participations", "Holding", "Distribution", "Développement", "Groupe" to 2–4% of names each;
+  - Indic script in 23.5% of S2 and 13.2% of S3 India names;
+  - house numbers perturbed in 22% of India and 13% of US true pairs;
+  - postcodes are rare (≈ 10% of US, ≈ 1% of India and France addresses).
+- **Source-added tokens.** Each source systematically adds words the others don't use:
+  - France: "Participations", "Holding", "Développement";
   - US: location prefixes ("Midtown", "Riverside");
-  - India: English words transliterated back and never mapped ("limitet", "venchars").
+  - India: unmapped transliterations ("limitet", "venchars").
 
 ### 2.2 Solution Strategy
 
-**Approach Type:** Blocking + classifier (hybrid retrieval, a trained cascade pruner, gradient-boosted pair classifier, metric-optimal decision rule)
+**Approach type:** blocking + classifier. The pieces are hybrid retrieval, a trained cascade pruner, a two-stage gradient-boosted pair classifier and a metric-optimal decision rule.
 
-**Core Innovation:**
-1. **Hybrid retrieval measured at full scale.** Hash-join keys alone found only 81% of true pairs (ceiling F0.5 0.904). Adding exact sparse TF-IDF top-10 retrieval raised that to 96.8%.
-2. **A trained cascade pruner** keeps the pair volume tractable (110M → 17M train pairs).
-3. **A vectorised expected-F0.5 decision rule** with a one-to-one constraint. It is tuned directly on the competition metric over all 2.2M train entities, not on pair-level accuracy.
-4. **Unsupervised "source-noise" detection.** The same rule runs for every country, which is how the model copes with France without seeing it in training.
+**Core innovations:**
+1. **Hybrid retrieval, measured at full scale.** Hash-join keys alone find 81% of true pairs. Exact sparse TF-IDF on a word view and a character n-gram view raise that to 97.4% before pruning.
+2. **A trained cascade pruner** on cheap retrieval features only. It decides which pairs the expensive matcher ever sees, so it sets the candidate-set size.
+3. **An expected-F0.5 decision rule tuned on the exact metric** over all 2.2M train entities. It counts every true match, including ones retrieval never found.
+4. **Test-like validation without labels.** We rebuild train with 20% of S1 removed and all their records kept. This reproduces test's orphan structure, and we choose the decision rule on it.
+5. **Per-country noise statistics computed the same way for every country.** Examples are the source-added tokens and the house-number conflict rate among confident pairs. The model trained on India/US only, so these let it adapt to France without labels and without any rule that names a country.
 
 ---
 
 ## 3. Candidate Generation (Blocking)
 
 **Normalisation first** (`prep.py`, `normalize.py`, `translit.py`):
-- **Canonical forms, no country branching.** Every variant of a token maps to one short canonical form, applied identically to both sides of a pair (street/str/st → st, private/pvt → pvt).
-- **Indic scripts** (nine of them, one ISCII-aligned table) are transliterated to Latin. Each word then snaps to the most frequent train-S1 Latin word with the same phonetic skeleton ("कंसल्टेंसी" → "consultancy").
+- **Canonical forms, identical for every country.** Every variant maps to one short form on both sides of a pair (street/str/st → st, private/pvt → pvt, avenue/av → ave, rue/r → rue).
+- **Indic scripts** (nine, one ISCII-aligned table) are transliterated to Latin. Each word then snaps to the most frequent train-S1 word with the same phonetic skeleton. This lifted token-set name similarity on Indic true pairs from 6.9 to 90.4.
+- **Output:** ≈ 20 derived fields per record: core name, legal forms, skeleton, initials, canonical address, landmark-free address, postcode, house number, street key. They go into a parquet cache.
 
-  This lifted name similarity on Indic-script true pairs from 6.9 to 90.4 (token-set).
-- **Output:** ~20 derived fields per record: core name, legal forms, name skeleton, initials, canonical address, landmark-free address, postcode, house number, street key. They are written once to a parquet cache.
-
-**Blocking keys used** (`retrieval.py`):
-1. **Hash-join keys, per country**, each group capped at ≤5 S1 and ≤50 candidates so chain names don't explode:
+**Blocking keys and retrieval** (`retrieval.py`; every key and index is built per country):
+1. **Hash-join keys**, groups capped at ≤ 5 S1 and ≤ 50 candidates so chain names can't explode:
    - exact core name;
-   - name skeleton plus one of the record's two rarest address words;
-   - house number plus street word;
-   - first name-skeleton token plus house number.
-2. **Exact sparse TF-IDF retrieval, per country:**
-   - word TF-IDF on "core name | canonical address";
-   - tokens in more than 1% of the country's records are dropped (they are expensive and uninformative), as are tokens seen once;
-   - every S2/S3 record retrieves its top-10 S1 records by exact cosine (`sparse_dot_topn`, multi-threaded).
-
-   We query in the candidate → S1 direction because each candidate has at most one true owner.
-3. **Union** of both, with retrieval features kept (TF-IDF cosine and rank, which keys fired).
+   - name skeleton + one of the two rarest address words;
+   - house number + street word;
+   - first skeleton token + house number.
+2. **Exact sparse TF-IDF top-k**, candidate → S1 (each candidate has at most one true owner):
+   - word view on "core name | canonical address", top-10;
+   - character 3–4-gram view on the core name, top-8. This view catches typos and glued words the word view misses.
+   - Terms in more than 1% of a country's records, or seen once, are dropped.
+   - Search uses `sparse_dot_topn`, multi-threaded and exact.
+3. **Union**, keeping each pair's retrieval features: cosines and ranks per view, which keys fired, per-S1 and per-candidate gaps.
 4. **Cascade pruner** (`cascade_pruner.py`):
-   - LightGBM on 14 retrieval-time features: cosine, rank, key flags, and gaps and ranks within the S1 and within the candidate;
-   - the threshold is chosen on held-out S1 records to keep 99.7% of retrieved true pairs.
+   - LightGBM on 19 retrieval-time features only (per view: cosine, rank, per-S1 and per-candidate gaps; key flags; pair counts);
+   - pairs below the pruner-score cut are dropped before any pair feature is computed.
 
 **Candidate pairs generated** (full scale):
 
-| Stage | Train pairs | Pairs per S1 | Recall of all true pairs | Test pairs |
+| Stage | Train pairs | Pairs per S1 | Recall of all true train pairs | Test pairs (per S1) |
 |---|---|---|---|---|
-| Hash keys only | 16.4M | 7.4 | 0.808 | 14.5M |
-| Union with TF-IDF top-10 | 110.1M | 49.9 | 0.968 | 106.4M |
-| **After cascade pruner** | **17.0M** | **7.7** | **0.965** | **16.8M** |
+| Hash keys only | 16.4M | 7.4 | 0.808 | 14.5M (8.4) |
+| Union with both TF-IDF views | 178.1M | 80.7 | 0.974 | – |
+| Pruner at 99.7% of retrieved positives | 18.7M | 8.5 | 0.971 | 18.6M (10.8) |
+| **Final pruner cut (score ≥ 0.01)** | **13.7M** | **6.2** | **0.968** | **13.6M (7.8)** |
 
-Reduction ratio vs. the same-country Cartesian product: ≈99.9999%. The pairs in `output/candidate_pairs.tsv` are exactly the post-pruner set the final model scores.
+`output/candidate_pairs.tsv` holds exactly the final set above, the only pairs the matcher scores. That's 2 × 10⁻⁶ of the within-country all-pairs space. Test has more pairs per S1 than train because of its orphan records.
 
 **How you ensured true matches were not lost:**
 - Recall of *all* true train pairs, including ones never retrieved, is measured after every stage.
-- The oracle F0.5, i.e. the score a perfect matcher would get on our candidates, is reported for every run. The final candidate set has oracle F0.5 = 0.985.
-- The pruner's threshold is set against a recall target on held-out entities, not a fixed score.
-- Its full recall-vs-reduction curve is logged: keeping 99.9% / 99.5% of retrieved true pairs keeps 20% / 13% of pairs.
+- The oracle F0.5 (a perfect matcher on our candidates) is reported for every run. At the 99.7% cut it is 0.987.
+- The final cut was chosen from a measured curve: F0.5 of the trained model on held-out train entities, at each candidate-set size. Each 10% fewer candidates cost ≈ 0.0005 F0.5. The final cut removes 27% of test candidates and 0.2% of the matches.
 
 ---
 
 ## 4. Matching Model
 
-**Features used** (`match.py`, ~90 per pair; nothing reads the country label):
+**Features used** (`match.py`, 102 per pair; no feature reads the country label):
 - **Name features:**
-  - rapidfuzz token-set, token-sort, ratio, partial ratio and Jaro-Winkler on the core name;
-  - token-set on the phonetic skeleton, and ratio on the no-space name;
-  - per-country TF-IDF cosine on name words and on name character 3-grams;
-  - numbers inside the name (match / conflict);
-  - initials (acronym) match;
-  - name frequency within the country, as a chain signal;
-  - the same similarities recomputed after removing each country's **source-noise tokens**, found without labels as tokens one source uses ≥5× more often than another.
+  - rapidfuzz token-set, token-sort, ratio, partial and Jaro-Winkler on the core name;
+  - token-set on the phonetic skeleton; ratio on the no-space name;
+  - per-country TF-IDF cosines on name words and name character 3-grams;
+  - numbers inside the name; acronym match; name frequency within the country (a chain signal);
+  - the same similarities recomputed after removing each country's **source-noise tokens**, found without labels as tokens one source uses far more often than another.
 - **Address features:**
   - token-set / token-sort / ratio / partial on the canonical address, the landmark-free address and the address words;
   - per-country TF-IDF cosine on address words;
-  - postcode, house-number and street agreement and conflict;
-  - overlap and conflict across *all* address numbers;
-  - landmark flags;
-  - de-noised address similarity.
-- **Other:**
-  - field-swap similarity (name vs. the other record's address);
-  - empty-field flags, lengths, and the Indic-script flag;
-  - source (S2 / S3);
-  - the retrieval features and the pruner's probability.
-- **Context:** rank and gap-to-best of key scores within the S1's candidates and within the S1 records competing for the same candidate. S1 is deduplicated, so each candidate has at most one true owner.
+  - postcode, house-number and street agreement and conflict; overlap and conflict across all address numbers;
+  - landmark flags; de-noised address similarity.
+- **Legal form:** agreement / conflict between the extracted legal forms (Pvt Ltd vs LLP; SARL vs SAS).
+- **Other:** field swap (name vs the other record's address), empty-field flags, lengths, Indic flag, source, and the retrieval features plus the pruner score.
+- **Context:** rank and gap-to-best of key scores within the S1's candidates and within the S1 records competing for the same candidate.
 
 **Model type:**
-- LightGBM binary classifier (MIT; 127 leaves, learning rate 0.08, early stopping).
-- Optionally blended with XGBoost (Apache-2.0), with the blend weight chosen on out-of-fold log-loss.
-- Training is 5-fold, grouped by S1 entity, over **all** train pairs, so the out-of-fold predictions cover every entity and the one-to-one competition between entities is preserved.
-- Each fold's model trains on a 30% sample of the other folds' entities. The final model is trained the same way over all folds.
+- **Stage 1:** LightGBM (MIT; 127 leaves, learning rate 0.08, early stopping, CPU) and XGBoost (Apache-2.0; hist, GPU), blended 50/50 (the weight is chosen on out-of-fold log-loss).
+  - Training is 5 folds grouped by S1 entity over all train pairs.
+  - Each fold's models train on 30% of the other folds' entities, so out-of-fold predictions cover every entity and the one-to-one competition is intact.
+- **Stage 2:** the same blend with 21 more features computed from stage-1 probabilities:
+  - within the S1: rank, gap to best, runner-up, probability mass;
+  - within the candidate: margin over the best competing S1;
+  - agreement with the S1's other top candidates: name and address similarity, house-number and postcode agreement.
+  - It uses the same folds as stage 1 (out-of-fold probabilities, no leakage) and raised out-of-fold F0.5 from 0.968 to 0.975.
 
-**Threshold selection method:** We optimise the macro F0.5 per entity directly, over two rule families, each with and without a one-to-one constraint (each candidate goes only to its highest-probability S1):
-1. a global probability threshold;
-2. a per-entity expected-F0.5 rule: take the top-k candidates maximising 1.25·Σp_topk / (0.25·Σp + k), and predict an empty list when P(no match) = Π(1−p) is higher.
+**Threshold selection method:**
+- Macro F0.5 per entity is optimised directly, on out-of-fold probabilities for all 2.2M train entities. Every true match counts, including ones retrieval never found.
+- Two rule families are tried, each with and without one-to-one (each candidate goes only to its highest-probability S1):
+  - a global threshold;
+  - a per-entity expected-F0.5 rule: take the top-k candidates maximising 1.25·Σq_topk / (0.25·Σq + k) with q = p^α, or predict an empty list when Π(1 − q) is higher.
+- **Chosen rule: expected-F0.5, one-to-one, α = 1.5.**
+  - α = 1.0 is marginally best on ordinary out-of-fold data. α = 1.5 is best on the orphan rebuild of India (20% of S1 removed, all their records kept), which reproduces test's structure.
+- The rule computes in float64. Test decisions originally ran in float32, which garbled per-entity sums; fixing that is worth +0.0005.
 
-Rules are scored on out-of-fold probabilities for all 2.2M train entities, counting every true match (including ones retrieval never found). The chosen rule is the expected-F0.5 rule with one-to-one.
+**Post-processing** (`postprocess.py --house-lr`; same procedure for every country):
+- For each country we measure, without labels, how often house numbers conflict among its confident mutual-best pairs (p ≥ 0.9, both records carry a house number). Test values are India 15.8%, US 7.2%, France 0.85%; train values are 13.8% and 5.1%.
+- Where a country's rate is **below the lowest rate of any training country**, conflicts are stronger evidence than the model learned. That country's conflicting pairs then have their odds multiplied by the ratio.
+- Only France qualifies (× 0.167); India and US are untouched by construction.
 
 ---
 
 ## 5. Results & Error Analysis
 
-- **F_0.5 Score (macro):** Train out-of-fold, reweighted to the test country mix (0.47 India / 0.38 US; France has no labels):
+- **F_0.5 Score (macro):** train out-of-fold uses India/US only (France has no labels); test-mix weights them 0.47 / 0.38.
 
-| Version | Candidate recall | Ceiling | India | US | Test-mix | Public LB |
+| Version | Recall | Ceiling | India | US | Test-mix | Public LB |
 |---|---|---|---|---|---|---|
 | No-ML baseline (hash keys + one threshold) | 0.808 | 0.904 | 0.800 | 0.852 | 0.823 | – |
-| Hash keys + LightGBM + expected-F0.5 rule | 0.808 | 0.904 | 0.833 | 0.929 | 0.876 | – |
-| + TF-IDF retrieval + cascade pruner (v2) | 0.965 | 0.985 | 0.936 | 0.966 | 0.949 | 0.9365 |
-| Final [TBD] | | | | | | |
+| + TF-IDF word view + pruner + LightGBM (v2) | 0.965 | 0.985 | 0.936 | 0.966 | 0.949 | 0.9365 |
+| + de-noised features, LightGBM/XGBoost (v3) | 0.965 | 0.985 | 0.947 | 0.969 | 0.957 | 0.947 |
+| + char n-gram view, legal-form feature, stage 2 (v5) | 0.971 | 0.987 | 0.968 | 0.983 | 0.975 | 0.9526 |
+| + float64 rule, α 1.5, house-number correction | 0.971 | 0.987 | – | – | – | **0.958** |
+| **Final: + pruner cut 0.01 (27% fewer candidates)** | 0.968 | – | – | – | – | [TBD] |
 
+- **Held-out check (India, 617k train entities the final models never saw):** 0.9683 at the 99.7% cut; the orphan rebuild costs 0.0018.
+- **What moved the leaderboard, and why:** v5's out-of-fold gain (+0.018) produced only +0.006 on the leaderboard. Solving the public score for the unseen country (weights 0.47 / 0.38 / 0.15) implied France had dropped. Two unlabelled statistics explained it:
+  - orphan records, which a more liberal rule wrongly assigns;
+  - France's house numbers being almost never perturbed, so the model, which learned that conflicts are routine noise, kept wrong same-street pairs.
+  - Correcting both gave +0.0054 on the leaderboard.
 - **Common false positives (wrong merges):**
-  - different branches or businesses with the same generic name on the same street (chains);
-  - candidates that two S1 records both claim with moderate probability, which the one-to-one constraint and competition features resolve only partly;
-  - short, generic core names once legal forms are stripped.
+  - an orphan record assigned to the most similar remaining S1;
+  - same name and street but a different house number where house numbers are reliable (France);
+  - generic short names once legal forms are stripped.
 - **Common false negatives (missed matches):**
-  - true pairs whose house numbers disagree between sources (22% of India and 13% of US true matches with two house numbers);
-  - names padded with source-added words;
-  - names reduced to initials ("Europeen Gestion" vs "EG");
-  - candidates with an empty address;
-  - the 3.5% of true pairs retrieval never proposes, which cap recall.
-- **France:** the public score implies France ≈ 0.86–0.89, below India/US. Spot-checks traced this mainly to the source-added name words, which motivated the de-noised features.
+  - true pairs never retrieved (3.2%): glued words, empty candidate addresses, generic names whose terms exceed the 1% document-frequency cap;
+  - heavily garbled transliterations;
+  - names reduced to initials.
+- **Tried and not shipped:**
+  - EM prior-shift correction: the model is calibrated at every level of candidate crowding, so it would double-count.
+  - Glued-word splitting + label-mined spellings as a test-time normalisation: recall +0.2pp, but F0.5 flat without retraining.
 
 ---
 
 ## 6. Conclusion
 
-At full scale, recall rather than the matcher was the bottleneck. Our sample-scale experiments suggested the opposite, because hard negatives are about 100× sparser in a 1% sample; measuring everything at full scale was the most valuable decision we made. A hybrid of cheap exact keys and exact sparse TF-IDF retrieval, a trained pruner, a gradient-boosted matcher and a decision rule tuned on the exact metric took us from 0.823 to 0.949 out-of-fold. Everything is country-agnostic and label-free outside training, which is what lets the pipeline run on France unchanged.
+- Measuring everything at full scale was the most valuable decision. Sample-scale results pointed at the matcher; full scale showed recall was the bottleneck.
+- Once recall was fixed, the remaining leaderboard gap came from how test differs from train, not from model capacity. Unlabelled statistics measured that difference and informed corrections that were identical for every country: a test-like rebuild for choosing the rule, and per-country noise rates.
+- A trained cascade pruner keeps the candidate set at 7.8 pairs per S1 on test, for 3.5 true matches per S1, at 96.8% recall of all true train pairs.
 
 ---
 
@@ -168,18 +183,51 @@ At full scale, recall rather than the matcher was the bottleneck. Our sample-sca
 
 ### A. Code Artefacts
 
-The code lives in `code/business_entity_resolution/`, with all source in `src/`. See `README.md` there for exact commands.
+Code is in `code/business_entity_resolution/src/`; exact commands are in `code/business_entity_resolution/README.md`. Cache directory names (`norm-…`, `pairs-…`, `feat-…`) are printed in `match.py`'s first log line.
 
-| Stage | Command / module | Output |
+| Stage | Command | Output |
 |---|---|---|
-| Normalise (once) | `python src/prep.py --data-dir <dataset> --work-dir <work>` | parquet cache of normalised records |
-| Everything else | `python src/match.py --data-dir <dataset> --work-dir <work> --out-dir <output>` | `output/matching_results.tsv`, `output/candidate_pairs.tsv`, `output/debug/` |
+| Normalise (once) | `python src/prep.py --data-dir <dataset> --work-dir <work>` | parquet cache |
+| Train, OOF, stage 2, test candidates | `python src/match.py --data-dir <dataset> --work-dir <work> --out-dir <run> --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2` | models, rule, OOF, cached test pairs |
+| Final candidate cut + scoring | `python src/predict_test.py --run-dir <run> --norm-dir <work>/norm-… --pair-cache <work>/pairs-… --feat-cache <work>/feat-… --prune-threshold 0.01 --out-dir <scored>` | `candidate_pairs.tsv`, test probabilities |
+| Decision + house-number correction | `python src/postprocess.py --run-dir <run> --probs-dir <scored> --norm-dir <work>/norm-… --out-dir output --rule expF:1.5 --house-lr <work>/feat-… --test-feat <scored>/cache/test_features.parquet` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` |
 
-Modules: `normalize.py` and `translit.py` (normalisation), `retrieval.py` (hash keys and TF-IDF retrieval), `cascade_pruner.py`, `match.py` (features, models, driver), `decide.py` (decision rules), `metric.py` (exact metric), `utils.py`.
-Models: LightGBM (MIT), optional XGBoost (Apache-2.0). No external data, APIs, geocoding or pretrained models; everything runs on CPU.
+- **Modules:**
+  - `normalize.py`, `translit.py`, `prep.py`: normalisation;
+  - `retrieval.py`: keys and TF-IDF retrieval;
+  - `cascade_pruner.py`;
+  - `match.py`: features, models, driver;
+  - `stage2.py`;
+  - `decide.py`, `metric.py`: decision rules and the exact metric;
+  - `predict_test.py`, `postprocess.py`;
+  - `build_token_maps.py`: optional, not used in the final run.
+- **Dependencies:** LightGBM (MIT), XGBoost (Apache-2.0), scikit-learn, rapidfuzz, polars, sparse_dot_topn. No external data, APIs, geocoding or pretrained models. XGBoost runs on CPU if no GPU is present.
+- **Reproducibility:** XGBoost's GPU training is not bit-for-bit deterministic, so a rerun reproduces the scores closely but not byte for byte.
 
 ### B. Additional Results
 
-- **Runtime** (full data, 28-core CPU): normalisation ≈12 min (once); the full `match.py` run ≈67 min (retrieval ≈19 min train + 10 min test; LightGBM 5-fold ≈23 min). Reproduction timing on 16 CPUs: [TBD].
-- **Cascade pruner tradeoff** (held-out train entities): share of pairs kept at 99.9% / 99.8% / 99.5% / 99% of retrieved true pairs = 20.3% / 17.2% / 13.5% / 11.3%.
-- **Predicted test structure** (v2): singleton rate 4.0% / 5.2% / 5.0% and 3.31 / 3.22 / 3.30 matches per S1 for France / India / US. Train truth is 5.6% and 3.46.
+- **Runtime** (i7-14700, 28 threads, RTX 4080 Super):
+  - normalisation ≈ 3–12 min (once);
+  - train retrieval ≈ 80 min, mostly the character view;
+  - stage 1 ≈ 30 min; stage 2 ≈ 17 min;
+  - test retrieval + features ≈ 40 min; scoring and post-processing ≈ 7 min.
+- **Candidate-set size vs F0.5** (India, held-out train entities, final models):
+
+  | Pairs per S1 | F0.5 |
+  |---|---|
+  | 8.6 | 0.9679 |
+  | 6.2 | 0.9665 |
+  | 5.5 | 0.9650 |
+  | 4.8 | 0.9617 |
+
+  The loss accelerates past a ~30% cut; the final cut (6.2 per S1 on India train, 7.8 per S1 on test) sits at that knee.
+
+- **Predicted test structure (final):**
+
+  | Country | Singleton rate | Matches per S1 |
+  |---|---|---|
+  | France | 5.2% | 3.33 |
+  | India | 6.3% | 3.25 |
+  | US | 5.5% | 3.40 |
+
+  Train truth is 5.6% singletons and 3.46 matches per S1.

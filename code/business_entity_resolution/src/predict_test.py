@@ -112,6 +112,9 @@ def main():
                                                       "the scored countries' rows; other lines kept byte for byte")
     ap.add_argument("--no-cache", action="store_true", help="rebuild test pairs and features even if cached")
     ap.add_argument("--stage1-only", action="store_true", help="ignore the run's stage 2: stage-1 models and rule")
+    ap.add_argument("--prune-threshold", type=float, default=0.0,
+                    help="stricter cascade-pruner cut than the run's own (smaller candidate set): keep test pairs with "
+                         "p_prune >= this, then rebuild features on the smaller set")
     a = ap.parse_args()
 
     t0 = time.time()
@@ -142,7 +145,7 @@ def main():
         s1 = s1.filter(pl.col("country_norm").is_in(countries)).drop("i").with_row_index("i")
         cand = cand.filter(pl.col("country_norm").is_in(countries)).drop("j").with_row_index("j")
         log(f"scoring {countries} only: S1={len(s1):,} S2/S3={len(cand):,}")
-    use_cache = not a.no_cache and not countries        # the run's caches hold every country, row-indexed
+    use_cache = not a.no_cache and not countries and not a.prune_threshold   # caches hold every pair of every country
     work = out / "cache"
     if use_cache and (fcache / "test_features.parquet").exists():
         log(f"loading cached test features {fcache / 'test_features.parquet'}")
@@ -150,7 +153,7 @@ def main():
     else:
         if m["feature_version"] != match.FEATURE_VERSION:     # rebuilt features must be the ones it trained on
             raise SystemExit(f"run trained on features {m['feature_version']}, code builds {match.FEATURE_VERSION}")
-        if use_cache and (pcache / "test_pairs.parquet").exists():
+        if not a.no_cache and not countries and (pcache / "test_pairs.parquet").exists():
             log(f"loading cached test pairs {pcache / 'test_pairs.parquet'}")
             pairs = pl.read_parquet(pcache / "test_pairs.parquet")
         else:
@@ -160,6 +163,11 @@ def main():
                 shutil.copy2(pcache / f, pc / f)
             pairs = match.candidates(s1, cand, "test", pc, m["tfidf_k"], None, m["prune_recall"], False,
                                      extra_k, extra_max_df)
+        if a.prune_threshold:            # stricter cascade cut, applied however the pairs were obtained
+            n0 = len(pairs)
+            pairs = pairs.filter(pl.col("p_prune") >= a.prune_threshold)
+            log(f"pruner cut p_prune >= {a.prune_threshold}: {n0:,} -> {len(pairs):,} pairs "
+                f"({len(pairs) / len(s1):.2f} per S1)")
         F = match.pair_features(pairs, s1, cand)
         del pairs
         match._write(F, work / "test_features.parquet")

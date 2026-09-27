@@ -68,6 +68,8 @@ def main():
                                                      "debug/train_oof.parquet, candidate_pairs.tsv")
     ap.add_argument("--norm-dir", required=True, help="normalisation cache the run used (row order of i/j)")
     ap.add_argument("--out-dir", required=True)
+    ap.add_argument("--probs-dir", default="", help="where debug/test_probs.parquet and candidate_pairs.tsv come from "
+                                                    "(e.g. a predict_test.py rescore); default: --run-dir")
     ap.add_argument("--em-prior", action="store_true", help="apply the per-country EM prior-shift correction")
     ap.add_argument("--house-lr", default="", help="train feature cache (feat-<key>/): where a country's confident "
                     "pairs show house-number conflicts less often than any training country did, conflicts are "
@@ -85,7 +87,8 @@ def main():
     if a.rule:
         kind, param = a.rule.split(":")
         rule = {"rule": kind, "param": float(param), "o2o": True}
-    tp = pl.read_parquet(run / "debug" / "test_probs.parquet")
+    src = Path(a.probs_dir) if a.probs_dir else run
+    tp = pl.read_parquet(src / "debug" / "test_probs.parquet")
     ti, tj, p = tp["i"].to_numpy(), tp["j"].to_numpy(), tp["p"].to_numpy()   # float32, as match.py decides
     s1, cand = match.load(Path(a.norm_dir), "test")
     if len(s1) <= ti.max() or len(cand) <= tj.max():
@@ -127,7 +130,7 @@ def main():
     (out / "debug").mkdir(parents=True, exist_ok=True)
     match.write_lists(out / "matching_results.tsv", s1, cand, ti[keep], tj[keep], "matched_entity_ids")
     match.write_lists(out / "debug" / "before_matching_results.tsv", s1, cand, ti[keep0], tj[keep0], "matched_entity_ids")
-    shutil.copy2(run / "candidate_pairs.tsv", out / "candidate_pairs.tsv")     # same candidates, same file
+    shutil.copy2(src / "candidate_pairs.tsv", out / "candidate_pairs.tsv")     # same candidates, same file
     pl.DataFrame({"i": ti, "j": tj, "p": q.astype(np.float32)}).write_parquet(out / "debug" / "test_probs.parquet")
     json.dump({"em": report, "rule": rule, "before": before, "after": after, "run": str(run)},
               open(out / "debug" / "postprocess.json", "w"), indent=2, default=float)
