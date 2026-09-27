@@ -396,12 +396,18 @@ class Model:
             return float(self.booster.best_score["valid_0"]["binary_logloss"])
         return float(self.booster.best_score)
 
-    def predict(self, X: np.ndarray) -> np.ndarray:
-        if self.kind == "lgb":
-            return self.booster.predict(X, num_iteration=self.best_iteration).astype(np.float32)
-        import xgboost as xgb
-        return self.booster.predict(xgb.DMatrix(X, feature_names=self.names),
-                                    iteration_range=(0, self.best_iteration + 1)).astype(np.float32)
+    def predict(self, X: np.ndarray, chunk: int = 2_000_000) -> np.ndarray:
+        """In row chunks: XGBoost holds its input as CSR (~8 bytes per value), so one 18M x 102 call needs ~15 GB
+        and on a 16 GB GPU spills into shared memory and crawls (it stalled v5's test phase)."""
+        out = np.empty(len(X), np.float32)
+        for s in range(0, len(X), chunk):
+            if self.kind == "lgb":
+                out[s:s + chunk] = self.booster.predict(X[s:s + chunk], num_iteration=self.best_iteration)
+            else:
+                import xgboost as xgb
+                out[s:s + chunk] = self.booster.predict(xgb.DMatrix(X[s:s + chunk], feature_names=self.names),
+                                                        iteration_range=(0, self.best_iteration + 1))
+        return out
 
     def importance(self, names: list[str]) -> np.ndarray:
         if self.kind == "lgb":

@@ -189,6 +189,8 @@ Leave-one-country-out. Train on US and score India, then the reverse, with no te
 The dict-based rules are still there for the legacy `run.py`. The new vectorised versions (`per_s1_f05`, `o2o_mask`,
 `expf_mask`, `rule_mask`, `tune_vec`) were checked against them on random data: zero mismatches, identical metric.
 
+**Precision fix (09-27 evening):** `expf_mask` builds per-S1 running sums as differences of one global `cumsum` over every pair. In float32 (the test path) that sum reaches millions and each step loses ~0.25, so it now always runs in float64. That's the dtype the rule is tuned in (`tune_vec` gets float64 OOF). On v5's OOF the fix is worth +0.00048 mix; on test, 34,147 decisions flip.
+
 `decide.tune_robust(table_groupcv, table_loco, france_weight=0.15)` picks **one** rule for every test record —
 never a per-country branch, which the competition rules forbid — by blending each candidate rule's group-CV mix
 score with its LOCO mean: `robust_score = 0.85 × mix + 0.15 × loco_mean`. This exists so a feature/rule that looks
@@ -197,9 +199,28 @@ without ever conditioning the shipped rule on the country label itself. Tested o
 the robust choice matched the group-CV-only choice (expF, α=1, o2o=True) — confirming it's a safe drop-in
 replacement for `tune_vec` that costs nothing when the two agree.
 
+### Final-push additions (09-27 evening): scoring and normalisation without retraining
+- **`predict_test.py`**: test-only scoring with a finished run's saved models and rule (stage 1 → stage 2 → rule),
+  no training. `--countries` rescored alone gives the same rows as inside a full run (everything is
+  country-scoped). `--splice-into` replaces those countries' rows in an existing submission and copies every other
+  line byte for byte. Runs launched before `EXTRA_VIEWS` recorded `char_k` and use older cache keys: pass
+  `--pair-cache`/`--feat-cache` from the run's log.
+- **`postprocess.py --em-prior`**: per-country label-shift correction on a run's test probabilities (EM,
+  Saerens et al. 2002), then the run's rule unchanged. Same procedure for every country. It's valid only because
+  the model is calibrated: on v5's OOF, EM recovers each train country's true positive rate within 0.002.
+- **Token maps** (`normalize.TOKEN_MAPS`, off by default; `prep.py --token-maps`, which is part of the norm-cache
+  key): token → replacement, applied right after `basic_clean`. Built by **`build_token_maps.py`**:
+  - **B1, glued words (unsupervised):** a token of ≥ 6 letters absent from every S1 name/address is split into S1
+    words (`nantesclub` → `nantes club`).
+  - **B2, spellings mined from true train pairs** (`fyuchar` → `future`). `--mine-s1 final-train` mines only the
+    S1s a run's final model trained on, keeping the rest an honest holdout.
+- **`tools/holdout_eval.py`**: F0.5 of a run's *final* models on the ~70% of train S1 they never trained on, from
+  cached features (baseline) or rebuilt from another norm cache (variant) — the before/after check for
+  test-time-only changes.
+
 ### Tools (not shipped)
 `crude_baseline.py` (fallback), `bench_retrieval.py` / `bench_union.py` (retrieval benchmarks), `profile_*.py`,
-and `package_submission.py` (zip builder: point `--output-dir` at the chosen `output_*/`).
+`holdout_eval.py` (above), and `package_submission.py` (zip builder: point `--output-dir` at the chosen `output_*/`).
 
 ---
 
@@ -258,6 +279,7 @@ Step 2, train side, full scale:
 
 | Time (IST) | Change |
 |---|---|
+| 09-27 ~20:25 | v5 LB 0.952557 (+0.0056 vs +0.0175 OOF; France likely got worse). Fixed a float32 precision bug in `decide.expf_mask` (+0.0005 OOF) and chunked prediction in `match.Model.predict`. Added `predict_test.py`, `postprocess.py` (`--rule`, `--house-lr`, `--em-prior`), token maps (`build_token_maps.py`, `prep --token-maps`) and `tools/holdout_eval.py`. Findings: France's confident-pair house-conflict rate is 0.85% vs ≥ 5.1% in every training country, handled by the house-LR correction. Orphans (test ≈ train minus 20% of S1) cost India ~0.0018 and favour expF α 1.5. B1/B2 token maps are flat without a retrain. |
 | 09-27 ~16:40 | Committed the tier-1/2 work below (f5 legal-conflict feature, generalised `EXTRA_VIEWS` retrieval, `decide.tune_robust`, version-keyed caching, B15 normalisation fixes, `stage2.py`'s LOCO no-transfer finding, sibling-propagation diagnostic). `output_v5` (char+addr+ns retrieval, B15, f5, stage2, lgb+xgb) running in the background. |
 | 09-27 ~15:00–16:40 | Session 2: found and fixed a critical cache-invalidation bug (source-hash → version-constant keys, see B13). Added feature set **f5** (legal-form-conflict). Generalised the retrieval view architecture to `EXTRA_VIEWS` (char/addr/name-no-space, each independently configurable). Rewrote `normalize.py`'s B15 fixes for real (cours/crs collision, N°, q, appartement, state-code phrases). Measured `stage2.py` via leave-one-country-out: group-CV +0.0096 but LOCO −0.0011 — does not transfer, not shipped. Added `decide.tune_robust` as the compliant way to pick one rule that's robust to an unseen country. Ran a sibling-propagation diagnostic (Tier 4 idea): 0.98% of all true pairs have a retrieved sibling with a strong address match — deferred the full build pending v5's real numbers. |
 | 09-27 ~01:20 | First write-up: three-pipeline split, integration gaps, bottlenecks B1–B9. No code changed. |

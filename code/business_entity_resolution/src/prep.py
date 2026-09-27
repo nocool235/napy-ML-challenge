@@ -13,6 +13,7 @@ killed run resumes where it stopped.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import multiprocessing as mp
 import sys
@@ -41,8 +42,12 @@ STR_COLS = ["name_clean", "name_core", "name_nospace", "name_initials", "name_le
 INT_COLS = ["name_ind", "addr_has_landmark", "addr_ntok", "addr_ind"]
 
 
-def norm_dir(work_dir: Path) -> Path:
-    return Path(work_dir) / f"norm-{code_hash(SRC / 'normalize.py', SRC / 'translit.py', extra=NORM_VERSION)}"
+def norm_dir(work_dir: Path, token_maps: Path | None = None) -> Path:
+    """The key covers the normalisation code, NORM_VERSION and, when given, the token-map file's content."""
+    extra = NORM_VERSION
+    if token_maps:
+        extra += "|tm:" + hashlib.sha1(Path(token_maps).read_bytes()).hexdigest()[:12]
+    return Path(work_dir) / f"norm-{code_hash(SRC / 'normalize.py', SRC / 'translit.py', extra=extra)}"
 
 
 # ----------------------------------------------------------------------------- workers
@@ -56,8 +61,9 @@ def _count_tokens(args):
     return cn, ca
 
 
-def _init(maps):
+def _init(maps, token_maps=None):
     N.set_skeleton_maps(maps)
+    N.set_token_maps(token_maps or {})
 
 
 def _normalise_part(args):
@@ -95,11 +101,15 @@ def build_skeleton_maps(data_dir: Path, pool, chunk: int) -> dict:
             "addr": N.build_skeleton_map(ca, {**N.ADDR_CANON, **N.PHRASES}, min_count=3, min_len=4, lead=2.0)}
 
 
-def run(data_dir: Path, work_dir: Path, jobs: int = 0, chunk: int = 100_000) -> Path:
-    out_dir = norm_dir(work_dir)
+def run(data_dir: Path, work_dir: Path, jobs: int = 0, chunk: int = 100_000, token_maps: Path | None = None,
+        splits: tuple[str, ...] = SPLITS) -> Path:
+    out_dir = norm_dir(work_dir, token_maps)
+    tmaps = json.loads(Path(token_maps).read_text()) if token_maps else {}
     out_dir.mkdir(parents=True, exist_ok=True)
     jobs = n_jobs(jobs)
-    log(f"prep: normalising into {out_dir} with {jobs} workers")
+    log(f"prep: normalising into {out_dir} with {jobs} workers"
+        + (f"; token maps {token_maps}: name={len(tmaps.get('name', {})):,} addr={len(tmaps.get('addr', {})):,}"
+           if token_maps else ""))
     maps_p = out_dir / "skeleton_maps.json"
     if maps_p.exists():
         maps = json.loads(maps_p.read_text())
@@ -108,12 +118,12 @@ def run(data_dir: Path, work_dir: Path, jobs: int = 0, chunk: int = 100_000) -> 
             maps = build_skeleton_maps(data_dir, pool, chunk)
         maps_p.write_text(json.dumps(maps))
         log(f"prep: skeleton maps built from train S1: name={len(maps['name']):,} addr={len(maps['addr']):,}")
-    todo = [(sp, so) for sp in SPLITS for so in SOURCES
+    todo = [(sp, so) for sp in splits for so in SOURCES
             if (data_dir / sp / f"{sp}_{so}.tsv").exists() and not (out_dir / f"{sp}_{so}" / "_SUCCESS").exists()]
     if not todo:
         log("prep: all parts present, nothing to do")
         return out_dir
-    with ProcessPoolExecutor(jobs, mp_context=MP, initializer=_init, initargs=(maps,)) as pool:
+    with ProcessPoolExecutor(jobs, mp_context=MP, initializer=_init, initargs=(maps, tmaps)) as pool:
         for sp, so in todo:
             d = out_dir / f"{sp}_{so}"
             d.mkdir(exist_ok=True)
@@ -149,5 +159,8 @@ if __name__ == "__main__":
     ap.add_argument("--work-dir", default="../../work")
     ap.add_argument("--n-jobs", type=int, default=0)
     ap.add_argument("--chunk", type=int, default=100_000)
+    ap.add_argument("--token-maps", default="", help="JSON from build_token_maps.py (off by default)")
+    ap.add_argument("--splits", default="train,test", help="comma list of splits to normalise")
     a = ap.parse_args()
-    run(Path(a.data_dir), Path(a.work_dir), a.n_jobs, a.chunk)
+    run(Path(a.data_dir), Path(a.work_dir), a.n_jobs, a.chunk, Path(a.token_maps) if a.token_maps else None,
+        tuple(x for x in a.splits.split(",") if x))

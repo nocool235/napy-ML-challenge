@@ -52,6 +52,16 @@ python code/business_entity_resolution/src/match.py --data-dir dataset --work-di
 # pairs and features are cached under cache/real_prep/pairs-*/ and feat-*/, keyed on hand-bumped version
 # constants (not a source hash) plus config, and reused automatically
 
+# 2b. the v5 configuration and the post-processing that produced the final-candidate files
+python code/business_entity_resolution/src/match.py --data-dir dataset --work-dir cache/real_prep --out-dir output_v5 \
+    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
+#    (if a run already has models + cached test features: predict_test.py rescores test without training)
+python code/business_entity_resolution/src/postprocess.py --run-dir output_v5 --norm-dir cache/real_prep/norm-<key> \
+    --out-dir output_final --rule expF:1.5 --house-lr cache/real_prep/feat-<key> \
+    --test-feat cache/real_prep/feat-<key>/test_features.parquet
+#    --rule: one global decision rule (chosen on a train rebuild with 20% of S1 removed, like test)
+#    --house-lr: per-country house-number likelihood correction, only below the lowest training-country rate
+
 # 3. validate, then package
 python utils/validate_submission.py --matching output/matching_results.tsv \
     --candidate output/candidate_pairs.tsv --test-dir dataset/test
@@ -99,6 +109,7 @@ runs on France unchanged.
 ## Changelog (this session)
 | Time (IST) | Change |
 |---|---|
+| 09-27 ~20:25 | v5 LB **0.952557** (rank 2293). Added `predict_test.py` (test-only scoring; chunked prediction), `postprocess.py` (`--rule`, `--house-lr`, `--em-prior`), token maps (`build_token_maps.py`, `prep --token-maps`) and `tools/holdout_eval.py` (final-model holdout, orphan simulation, rule grid). Fixed a float32 precision bug in `decide.expf_mask` (+0.0005 OOF) and chunked `match.Model.predict` (the monolithic GPU prediction stalled). Details in `EXPERIMENTS.md` rows 7–8. |
 | 09-27 ~16:40 | f5 legal-conflict feature, generalised `EXTRA_VIEWS` retrieval (char/addr/name-no-space, each configurable), `decide.tune_robust` (picks one rule robust to an unseen country — never a per-country branch), version-keyed caching (fixed a critical cache-invalidation bug), B15 normalisation fixes shipped for real, stage2 found NOT to transfer via LOCO (not shipped). `output_v5` (all of the above + stage2) running. Full state in `submission_log.tsv`, `EXPERIMENTS.md`, `ARCHITECTURE.md`. |
 | 09-27 ~01:20 | Rewrote this README from a stub; created `ARCHITECTURE.md`. |
 | 09-27 01:37 | Crude baseline re-run → `output_crude/`. |

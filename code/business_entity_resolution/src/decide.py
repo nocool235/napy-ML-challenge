@@ -115,7 +115,9 @@ def o2o_mask(j: np.ndarray, p: np.ndarray) -> np.ndarray:
 def expf_mask(i: np.ndarray, p: np.ndarray, alpha: float = 1.0, elig: np.ndarray | None = None) -> np.ndarray:
     """Per S1: the top-k eligible pairs maximising E[F0.5] ~ 1.25 sum_topk(q) / (0.25 sum(q) + k), taken
     only if that beats E[empty] = prod(1 - q). q = p ** alpha."""
-    q = np.clip(p, 1e-6, 1 - 1e-6) ** alpha
+    # float64 always: `cum` below is a difference of one global cumsum over all pairs, which reaches millions;
+    # in float32 that loses ~0.25 per step and garbles the per-S1 sums (the rule is tuned on float64 OOF)
+    q = np.clip(np.asarray(p, dtype=np.float64), 1e-6, 1 - 1e-6) ** alpha
     elig = np.ones(len(p), bool) if elig is None else elig
     qe = np.where(elig, q, 0.0)
     order = np.lexsort((-qe, i))

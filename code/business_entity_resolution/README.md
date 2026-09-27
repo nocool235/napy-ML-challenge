@@ -73,6 +73,9 @@ feature set automatically.
 | `cascade_pruner.py` | Retrieval-time features and the LightGBM pruner |
 | `match.py` | Main driver: pair features, LightGBM/XGBoost out-of-fold training, blend, decision, outputs |
 | `stage2.py` | Second-stage features: probability context within each S1 / candidate, sibling agreement |
+| `predict_test.py` | Test-only scoring with a finished run's saved models and rule; optional per-country rescoring and splicing |
+| `postprocess.py` | `--em-prior`: per-country label-shift (EM) correction of test probabilities, then the same rule |
+| `build_token_maps.py` | Optional token maps for normalisation: glued-word splits (unsupervised) and label-mined spellings |
 | `decide.py`, `metric.py` | Vectorised decision rules and the exact competition metric |
 | `utils.py` | Logging with ETA, hashing, TSV reading |
 
