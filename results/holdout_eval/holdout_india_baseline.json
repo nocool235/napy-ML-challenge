@@ -1,0 +1,17 @@
+{
+  "countries": [
+    "india"
+  ],
+  "rebuild": false,
+  "norm": "cache\\real_prep\\norm-0c9c1740ce",
+  "holdout_s1": 617233,
+  "pairs": 7619989,
+  "pairs_per_s1": 8.628,
+  "recall_holdout": 0.94797,
+  "oracle_f05_holdout": 0.98007,
+  "f05_holdout": 0.96822,
+  "f05_holdout_singletons": 0.96906,
+  "f05_holdout_matched": 0.96817,
+  "f05_train_part (in-sample)": 0.97505,
+  "seconds": 166
+}
