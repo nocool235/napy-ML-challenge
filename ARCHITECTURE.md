@@ -1,6 +1,6 @@
 # Architecture: Amazon ML Challenge 2026 — Business Entity Resolution
 
-*Verified against the working tree on 2026-09-27 (deadline day). Updated in the same session every time
+*Verified against the working tree on 2026-09-27 22:15 IST (deadline day; final pipeline = v6). Team napy. Updated in the same session every time
 the code changes; see the changelog at the bottom.*
 
 ---
@@ -16,7 +16,7 @@ else is either the shared normalisation stage, a fallback, or legacy code.
 
 | Pipeline | Entry point | Status |
 |---|---|---|
-| **Main: `match.py`** | `src/match.py` | Full scale, polars, reads the `prep.py` parquet cache. Retrieval (hash keys + configurable TF-IDF views, `EXTRA_VIEWS`) → cascade pruner → 94 pair features (`f5`) → LightGBM + optional GPU XGBoost out-of-fold → vectorised expected-F0.5 decision rule → both TSVs. `--tfidf-k 0` reproduces the hash-keys-only "step 1" run. |
+| **Main: `match.py` + `postprocess.py`** | `src/match.py`, `src/postprocess.py` | Final (v6). Retrieval: hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8. Cascade pruner with a stricter cut (score ≥ 0.01; 7.8 candidates per S1 on test). 102 pair features (`f5`). XGBoost on all train entities, 5-fold OOF, then stage 2 (+21 features). `postprocess.py` applies the rule (expF α 1.5, one-to-one) and the house-number correction. |
 | Fallback: crude baseline | `tools/crude_baseline.py` | No-ML hash-join + one global threshold. Valid, full scale, test-mix ≈ 0.823. Kept as the safety net. |
 | Legacy: `run.py` | `src/run.py` → `blocking.py` → `features.py` → `model.py` | Pandas, in-memory, never run above a 1% sample. Superseded by `match.py`; `decide.py`/`metric.py` are shared. |
 
@@ -57,12 +57,12 @@ flowchart TD
 
     subgraph MAIN["match.py (main pipeline, identical code for train and test)"]
         R1["retrieval.hash_candidates<br/>4 capped hash-join keys, per country<br/>(i, j, kbits)"]
-        R2["retrieval.tfidf_candidates<br/>word TF-IDF on name_addr, df ≤ 1%<br/>top-10 S1 per S2/S3 (sparse_dot_topn)"]
+        R2["retrieval.tfidf_candidates<br/>word TF-IDF on name_addr (top-10) +<br/>char 3-4-grams on name_core (top-8), df ≤ 1%<br/>exact sparse_dot_topn, per country"]
         U["union + retrieval features<br/>tf_cos, tf_rank, key flags,<br/>per-S1 / per-candidate ranks and gaps"]
-        PR["cascade_pruner.Pruner<br/>LightGBM on retrieval features<br/>keep 99.7% of retrieved true pairs"]
+        PR["cascade_pruner.Pruner<br/>LightGBM on 19 retrieval features<br/>fit at 99.7% of retrieved true pairs;<br/>final cut score ≥ 0.01 (7.8 per S1 on test)"]
         FE["pair_features<br/>13 rapidfuzz scores, postcode / house / street<br/>agreement, name frequency, context ranks"]
-        M["LightGBM (CPU) + optional XGBoost (GPU), 5-fold out-of-fold by S1,<br/>trained in parallel per fold; blend weight on OOF log-loss"]
-        D["decide.tune_vec<br/>threshold vs expected-F0.5 top-k,<br/>one-to-one on/off, on the exact metric"]
+        M["XGBoost (GPU) on all train entities, 5-fold OOF by S1<br/>+ stage 2: 21 features over stage-1 probabilities<br/>(LightGBM + XGBoost blend also supported)"]
+        D["decide.tune_vec (OOF) + postprocess.py<br/>expected-F0.5, one-to-one, α 1.5 (orphan rebuild);<br/>house-number likelihood correction per country"]
         O["output/matching_results.tsv<br/>output/candidate_pairs.tsv (= the pairs the model scored)"]
         R1 --> U
         R2 --> U
@@ -224,20 +224,24 @@ replacement for `tune_vec` that costs nothing when the two agree.
 
 ---
 
-## 5. Results (full scale, train out-of-fold; test-mix = India/US reweighted to the test mix)
+## 5. Results (full scale; test-mix = train out-of-fold, India/US reweighted to the test mix)
 
-| Run | Candidate recall | Ceiling (perfect matcher) | India | US | Test-mix | Runtime |
+| Run | Candidate recall | Ceiling | India | US | Test-mix | Public LB |
 |---|---|---|---|---|---|---|
-| Crude baseline (`output_crude/`) | 0.808 | 0.904 | 0.800 | 0.852 | 0.823 | 6 min |
-| Step 1: `match.py --tfidf-k 0` (`output_v1/`) | 0.808 | 0.904 | 0.833 | 0.929 | **0.876** | 21 min |
-| Step 2: `match.py --tfidf-k 10` (`output_v2/`) | 0.968 → 0.965 after pruning | 0.985 | 0.936 | 0.966 | **0.949** | train ≈ 51 min; test outputs being written |
+| Crude baseline (`output_crude/`) | 0.808 | 0.904 | 0.800 | 0.852 | 0.823 | – |
+| v1: hash keys + LightGBM | 0.808 | 0.904 | 0.833 | 0.929 | 0.876 | – |
+| v2: + word TF-IDF + pruner | 0.965 | 0.985 | 0.936 | 0.966 | 0.949 | 0.9365 |
+| v3: + de-noised features | 0.965 | 0.985 | 0.947 | 0.969 | 0.957 | 0.947 |
+| v5: + char view, legal feature, stage 2 | 0.971 | 0.987 | 0.968 | 0.983 | 0.975 | 0.952557 |
+| v5 + float64 rule, α 1.5, house correction | 0.971 | 0.987 | – | – | – | **0.958** |
+| **v6: lean cut (−27% candidates), XGBoost on 100% of entities** | 0.968 | 0.986 | 0.968 | 0.984 | 0.975 | [pending] |
 
-Step 2, train side, full scale:
-- **Retrieval:** TF-IDF top-10 took 6 min for India (883k S1 × 4.1M candidates) and 12 min for US (1.32M × 6.2M) on 28 cores. The union with hash keys has 110.1M pairs (49.9 per S1) and finds 0.968 of all true matches.
-- **Pruner:** 6.5× cut to 17.0M pairs (7.7 per S1) at 99.7% of retrieved true pairs, for final recall 0.965. The held-out tradeoff: keeping 99.9% keeps 20.3% of pairs, 99.8% → 17.2%, 99.5% → 13.5%, 99% → 11.3%.
-- **Model:** 5 folds at 165–287 s each (best iteration 1.6k–2.3k), then the final model. Training is now the longest stage (~23 min).
-- **Decision:** expected-F0.5 with one-to-one, α = 1.0. The best plain threshold (p ≥ 0.65 with one-to-one) is only 0.0006 behind.
-- **Where the gain came from:** recall. India rose 0.10 (0.833 → 0.936) and US 0.04. About 0.036 remains between the model and the ceiling; that gap is now the matcher's to close.
+Full-scale facts for the final pipeline:
+- **Retrieval (train):** hash keys give 16.4M pairs. The word view took 6 min for India and 13 min for US; the char view 10 and 50 min (the US figure was inflated by contention; about 22 min clean). The union has 178M pairs (80.7 per S1) and recall 0.974.
+- **Pruner:** 99.7% of retrieved true pairs gives 18.7M pairs (8.5 per S1, recall 0.971). The final cut (score ≥ 0.01) gives 13.7M (6.2 per S1, recall 0.968); test has 13.6M (7.8 per S1).
+- **Candidate-size curve** (India, held-out train entities, final models): each 10% fewer candidates costs ≈ 0.0005 F0.5, and the loss accelerates past a ~30% cut.
+- **Model (v6):** XGBoost on the GPU, 130 s per fold at 100% of entities (the 3000-round cap was reached, so v7 tries 6000). Stage-1 OOF 0.9691, stage 2 0.9751.
+- **Why the LB lagged OOF:** orphan records, since test ≈ train with 20% of S1 removed (costs ~0.002, favours α 1.5), and France house numbers being 6× more reliable than in training (corrected post hoc: +0.005 LB).
 
 ---
 
@@ -249,10 +253,10 @@ Step 2, train side, full scale:
 | B2 | Retrieval and pruner not wired to anything | **Done.** `match.py` runs retrieval → pruner → features → model → decision. |
 | B3 | faiss / sparse_dot_topn not pinned | **Done.** Both pinned in `requirements.txt`. |
 | B4 | Legacy `run.py` unproven at scale | **Superseded** by `match.py` (full-scale, polars). Keep `run.py` out of the submission or document it as legacy. |
-| B5 | Candidate recall caps F0.5 | **Largely addressed.** Hash keys alone: 0.808 recall, 0.904 ceiling. With TF-IDF top-10 + pruner: 0.965 recall, 0.985 ceiling. Next: analyse the remaining 3.2% of misses, and add a char n-gram or name-only view if they're mostly typos or Indic spellings. |
+| B5 | Candidate recall caps F0.5 | **Addressed (final: 0.968 at the lean cut, 0.974 before pruning).** Char n-gram view shipped in v5. Hash keys alone: 0.808 recall, 0.904 ceiling. With TF-IDF top-10 + pruner: 0.965 recall, 0.985 ceiling. Next: analyse the remaining 3.2% of misses, and add a char n-gram or name-only view if they're mostly typos or Indic spellings. |
 | B6 | TF-IDF retrieval is slow: 19 min on train, 28 cores (India 6 + US 12) | Cost grows roughly quadratically with country size. Options: lower `max_df` (0.005), or a GPU sparse top-k (torch/CUDA; high engineering risk). |
 | B7 | Memory: 110M pairs before pruning; features + model matrix ≈ 2× the pruned frame | The pruner keeps it bounded (17M pairs); `--prune-recall` trades recall for memory. Peak RAM ≈ 9–10 GB. |
-| B12 | **Reproduction runtime on the organisers' 16 CPUs (3 h limit).** The full step-2 run is ≈ 1.5 h on 28 cores, of which ~23 min is 5-fold out-of-fold training that exists only to choose the decision rule. | Add a reproduction mode that trains the final model once and reuses the saved rule. Time a run capped at 16 threads before the final package. |
+| B12 | **Reproduction runtime** (v6: ≈ 2.5 h on 28 cores + GPU; CPU-only XGBoost is slower). The full step-2 run is ≈ 1.5 h on 28 cores, of which ~23 min is 5-fold out-of-fold training that exists only to choose the decision rule. | Add a reproduction mode that trains the final model once and reuses the saved rule. Time a run capped at 16 threads before the final package. |
 | B13 | Feature cache and retrieval were coupled | **Done.** Separate `pairs-`/`feat-` caches. Originally keyed on function source; rekeyed to hand-bumped version constants (see Matcher §Caching, above) after a source-hash false-invalidation cost an unplanned ~45-min retrieval rebuild mid-run. The v2 cache was migrated across both scheme changes, so no retrieval rerun was needed. |
 | B14 | Idle GPU | **Done.** XGBoost with CUDA (`--models lgb,xgb --device cuda`): a fold takes 57 s on GPU vs 187 s for LightGBM on CPU, at almost the same log-loss (0.0696 vs 0.0692). **Decision rule for shipping:** XGBoost ships only if the blend beats LightGBM alone by ≥ 0.002 OOF *and* the CPU-only reproduction run fits comfortably inside 3 h on 16 threads. |
 | B8 | France is unlabelled; decisions are tuned on India/US only | **Measured and partly addressed.** Upload #1 (v2) scored 0.9365 public, which implies **France ≈ 0.86–0.89** vs ~0.94–0.97 for India/US. `tools/spot_check.py` findings: <br/>• The model is *confident* on France (4.3% of pairs uncertain vs 6–7%), so the errors are confident mistakes. <br/>• House-number conflicts are **not** France-specific (train true matches also conflict: India 22%, US 13%). <br/>• **The main cause:** S2/S3 pad French names with words S1 never uses ("Participations", "Holding", "Distribution", "Développement", "Associés", "Groupe", 2–4% each). US has the same effect far more weakly ("Midtown", "Riverside"), and India has unmapped transliterations ("limitet", "venchars"). <br/>• **Fix, f4:** data-driven source-noise tokens (same rule for every country, no labels) and similarity features on the de-noised text. <br/>• **Still open:** the France proxy run (train on one country, score the other). |
@@ -264,14 +268,15 @@ Step 2, train side, full scale:
 
 ---
 
-## 7. Plan (agreed 09-27 ~03:40)
+## 7. Final state (09-27 22:15)
 
-1. Commit and push the current state.
-2. GPU XGBoost behind a flag, plus a separate pruned-pair cache (B13, B14).
-3. Cheap feature batch: landmark flags, all-address-number comparison, name↔address field swap, separate name and address rare-word (IDF) overlap. Check the gain per country.
-4. One run with both models; validate; submit. (Step 2 gets submitted as soon as it validates, as the leaderboard anchor.)
-5. Second-stage model: a second out-of-fold training round on stage-1 probabilities plus their context (gap to the S1's best, runner-up probability for the candidate, probability mass per S1, sibling agreement), run on the GPU. In parallel: France proxy mode (train on one country, score the other), the retrieval-miss analysis, and the reproduction mode (B12).
-6. Deliverables by ~20:00: methodology doc, submission log, packaged zip.
+The morning plan (§ above, steps 1–6) was completed. Stage 2 shipped: v5 onwards, OOF +0.006. The evening added:
+1. A float64 fix in the decision rule. The first stage-2 run (v5) then went through test scoring with chunked prediction, because its monolithic GPU predict stalled.
+2. A post-mortem of the v5 leaderboard gap. This produced the orphan rebuild and the house-number correction: +0.0054 LB.
+3. A smaller candidate set, since the organisers rank it: the pruner cut 0.01.
+4. v6: XGBoost on all train entities, on the lean set.
+
+Packaging: `python tools/package_submission.py --team napy --doc Documentation_template.md --output-dir <final>`.
 
 ---
 
@@ -279,6 +284,7 @@ Step 2, train side, full scale:
 
 | Time (IST) | Change |
 |---|---|
+| 09-27 ~22:15 | Upload 4 (v5 + post-processing) = **0.958**. v6 trains XGBoost on 100% of entities on the lean candidate set (pruner cut 0.01; −27% candidates): OOF 0.9751. Added `match.py --prune-threshold/--rounds/--norm-dir/--pair-cache/--feat-cache`. The house correction is now guarded (min 1000 confident pairs, factor ≥ 0.05). Docs refreshed for the final package (team napy). |
 | 09-27 ~20:25 | v5 LB 0.952557 (+0.0056 vs +0.0175 OOF; France likely got worse). Fixed a float32 precision bug in `decide.expf_mask` (+0.0005 OOF) and chunked prediction in `match.Model.predict`. Added `predict_test.py`, `postprocess.py` (`--rule`, `--house-lr`, `--em-prior`), token maps (`build_token_maps.py`, `prep --token-maps`) and `tools/holdout_eval.py`. Findings: France's confident-pair house-conflict rate is 0.85% vs ≥ 5.1% in every training country, handled by the house-LR correction. Orphans (test ≈ train minus 20% of S1) cost India ~0.0018 and favour expF α 1.5. B1/B2 token maps are flat without a retrain. |
 | 09-27 ~16:40 | Committed the tier-1/2 work below (f5 legal-conflict feature, generalised `EXTRA_VIEWS` retrieval, `decide.tune_robust`, version-keyed caching, B15 normalisation fixes, `stage2.py`'s LOCO no-transfer finding, sibling-propagation diagnostic). `output_v5` (char+addr+ns retrieval, B15, f5, stage2, lgb+xgb) running in the background. |
 | 09-27 ~15:00–16:40 | Session 2: found and fixed a critical cache-invalidation bug (source-hash → version-constant keys, see B13). Added feature set **f5** (legal-form-conflict). Generalised the retrieval view architecture to `EXTRA_VIEWS` (char/addr/name-no-space, each independently configurable). Rewrote `normalize.py`'s B15 fixes for real (cours/crs collision, N°, q, appartement, state-code phrases). Measured `stage2.py` via leave-one-country-out: group-CV +0.0096 but LOCO −0.0011 — does not transfer, not shipped. Added `decide.tune_robust` as the compliant way to pick one rule that's robust to an unseen country. Ran a sibling-propagation diagnostic (Tier 4 idea): 0.98% of all true pairs have a retrieved sibling with a strong address match — deferred the full build pending v5's real numbers. |

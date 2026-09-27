@@ -9,26 +9,32 @@ bottleneck list are in **[`ARCHITECTURE.md`](ARCHITECTURE.md)**.
 > Reflects the working tree as of 2026-09-27. This README and `ARCHITECTURE.md` are updated together whenever
 > the code changes; see the changelog at the bottom.
 
-## Current state
+## Current state (27 Sep, 22:15 IST): final pipeline
 
-This repo is the team's single main line. The main pipeline is `src/match.py`:
+Team **napy** (Adarsh Bhatt, Prakhar Saxena, Yash Goel, Nakul Verma). Single main line; the final pipeline is
+`src/match.py` + `src/postprocess.py`:
 
 ```
-prep.py (normalise → parquet cache)
-  → retrieval.py   hash-join keys + TF-IDF top-10 per S2/S3 record (per country)
-  → cascade_pruner.py   LightGBM on retrieval features, keeps 99.7% of retrieved true pairs
-  → match.py   64 pair features → LightGBM (5-fold out-of-fold) → expected-F0.5 decision rule
-  → output/matching_results.tsv, output/candidate_pairs.tsv
+prep.py        normalise → parquet cache (Indic transliteration, skeletons, canonical names/addresses)
+match.py       retrieval.py       hash-join keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8, per country
+               cascade_pruner.py  LightGBM on retrieval features; stricter cut (score ≥ 0.01): 7.8 candidates per S1 on test
+               match.py           102 pair features → XGBoost on all train entities (5-fold OOF) → stage 2 (+21 features)
+postprocess.py expected-F0.5 rule, one-to-one, α 1.5 (chosen on a test-like train rebuild)
+               + house-number likelihood correction where a country's noise rate is below every training country's
+               → output/matching_results.tsv, output/candidate_pairs.tsv
 ```
 
-| Submission | Train OOF test-mix F0.5 | Validator | Notes |
-|---|---|---|---|
-| `output_crude/` | 0.823 | – | No-ML fallback (`tools/crude_baseline.py`) |
-| `output_v1/` | **0.876** | PASS | `match.py --tfidf-k 0`: hash-key candidates only (recall 0.81, ceiling 0.904) |
-| `output_v2/` | **0.949** | test outputs being written | `match.py --tfidf-k 10`: TF-IDF retrieval + pruner (recall 0.965, ceiling 0.985) |
+| Upload | Files | OOF test-mix | Public LB | What changed |
+|---|---|---|---|---|
+| 1 | `output_v2/` | 0.949 | 0.9365 | hash keys + word TF-IDF + pruner, LightGBM |
+| 2 | `output_v3/` | 0.957 | 0.947 | de-noised features (source-noise tokens) |
+| 3 | `output_v5/` | 0.975 | 0.952557 | char n-gram view, legal-form feature, stage 2, LightGBM+XGBoost |
+| 4 | `output_v5_fix15_hlr/` | – | **0.958** | float64 rule fix, α 1.5, France house-number correction |
+| 5 | `output_v6_fix15_hlr/` | 0.975 (lean set) | [pending] | v6: 27% fewer candidates, XGBoost on all entities |
 
 "Test-mix" is the train out-of-fold score with India and US weighted as in the test set (0.47/0.38). France has no
-labels, so it is not in this number. The leaderboard score is the real check.
+labels, so the leaderboard is the only France measurement. Details: `EXPERIMENTS.md`; methodology:
+`Documentation_template.md`; engineering: `ARCHITECTURE.md`; upload log: `submission_log.tsv`.
 
 ## Reproduce
 
@@ -52,13 +58,13 @@ python code/business_entity_resolution/src/match.py --data-dir dataset --work-di
 # pairs and features are cached under cache/real_prep/pairs-*/ and feat-*/, keyed on hand-bumped version
 # constants (not a source hash) plus config, and reused automatically
 
-# 2b. the v5 configuration and the post-processing that produced the final-candidate files
-python code/business_entity_resolution/src/match.py --data-dir dataset --work-dir cache/real_prep --out-dir output_v5 \
-    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
-#    (if a run already has models + cached test features: predict_test.py rescores test without training)
-python code/business_entity_resolution/src/postprocess.py --run-dir output_v5 --norm-dir cache/real_prep/norm-<key> \
-    --out-dir output_final --rule expF:1.5 --house-lr cache/real_prep/feat-<key> \
+# 2b. THE FINAL SUBMISSION (v6): lean candidate set, XGBoost on all entities, then post-processing
+python code/business_entity_resolution/src/match.py --data-dir dataset --work-dir cache/real_prep --out-dir output_v6 \
+    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --prune-threshold 0.01 --models xgb --device cuda --train-frac 1.0 --stage2
+python code/business_entity_resolution/src/postprocess.py --run-dir output_v6 --norm-dir cache/real_prep/norm-<key> \
+    --out-dir output --rule expF:1.5 --house-lr cache/real_prep/feat-<key> \
     --test-feat cache/real_prep/feat-<key>/test_features.parquet
+#    <key>: the cache names match.py prints in its first log line
 #    --rule: one global decision rule (chosen on a train rebuild with 20% of S1 removed, like test)
 #    --house-lr: per-country house-number likelihood correction, only below the lowest training-country rate
 
@@ -109,6 +115,7 @@ runs on France unchanged.
 ## Changelog (this session)
 | Time (IST) | Change |
 |---|---|
+| 09-27 ~22:15 | Uploads 4–5: `output_v5_fix15_hlr` = **0.958**; v6 uploaded (lean candidates: 7.8 per S1, −27%; XGBoost on 100% of train entities; OOF 0.9751). `match.py --prune-threshold`, `--rounds`, cache overrides; house correction guarded. Docs updated for packaging (team napy). |
 | 09-27 ~20:25 | v5 LB **0.952557** (rank 2293). Added `predict_test.py` (test-only scoring; chunked prediction), `postprocess.py` (`--rule`, `--house-lr`, `--em-prior`), token maps (`build_token_maps.py`, `prep --token-maps`) and `tools/holdout_eval.py` (final-model holdout, orphan simulation, rule grid). Fixed a float32 precision bug in `decide.expf_mask` (+0.0005 OOF) and chunked `match.Model.predict` (the monolithic GPU prediction stalled). Details in `EXPERIMENTS.md` rows 7–8. |
 | 09-27 ~16:40 | f5 legal-conflict feature, generalised `EXTRA_VIEWS` retrieval (char/addr/name-no-space, each configurable), `decide.tune_robust` (picks one rule robust to an unseen country — never a per-country branch), version-keyed caching (fixed a critical cache-invalidation bug), B15 normalisation fixes shipped for real, stage2 found NOT to transfer via LOCO (not shipped). `output_v5` (all of the above + stage2) running. Full state in `submission_log.tsv`, `EXPERIMENTS.md`, `ARCHITECTURE.md`. |
 | 09-27 ~01:20 | Rewrote this README from a stub; created `ARCHITECTURE.md`. |

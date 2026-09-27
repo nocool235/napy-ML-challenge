@@ -1,5 +1,7 @@
 # Methodology draft (copy into the official Documentation_template.md)
 
+> **Historical (early team draft, 25–26 Sep).** Superseded by `Documentation_template.md` (final methodology, team napy) and `ARCHITECTURE.md`. Kept for reference; its pipeline description predates the final one.
+
 Replace every `[..]` placeholder with your real numbers from `output/debug/metrics_train.json`.
 
 ## 1. Methodology overview

@@ -67,6 +67,7 @@ On Windows, set `PYTHONIOENCODING=utf-8` first.
 | `--models` | `lgb` | `lgb`, `xgb` or `lgb,xgb`. Two models are blended, with the weight chosen on out-of-fold log-loss |
 | `--device` | `cpu` | `cuda` runs XGBoost on a GPU (optional; not needed to reproduce) |
 | `--folds`, `--train-frac` | 5, 0.3 | Out-of-fold folds, and the share of train S1 records each model trains on |
+| `--rounds` | 3000 | Maximum boosting rounds (early stopping on 10% of the training entities) |
 | `--stage2` | – | Second-stage model over stage-1 probabilities and sibling agreement; used only if it improves out-of-fold |
 | `--cv` | `group` | `country` = leave-one-country-out (train on one country, score the other), a proxy for an unseen country |
 | `--validate-only` | – | Train and out-of-fold only; no test outputs |

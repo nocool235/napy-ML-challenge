@@ -1,5 +1,7 @@
 # Team setup: 4 people, 4 × $200 credits, one shared S3 bucket
 
+> **Historical (initial team plan for SageMaker / S3).** The final work ran on one local Windows machine (i7-14700, RTX 4080 Super); see `README.md` and `ARCHITECTURE.md` for the current setup.
+
 ## Shape
 - **Code** is shared through one private GitHub repo. Each person works on a branch, and merges go through one person.
 - **Data and outputs** live in one S3 bucket in the *hub* account, and all four accounts can read and write it.

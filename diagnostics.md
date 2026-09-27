@@ -1,5 +1,7 @@
 # Diagnostics — `output_v3` (LB public 0.947)
 
+> **Snapshot of the v3 run (LB 0.947), written 27 Sep ~17:00.** Later findings, including the float64 decision-rule fix, orphan records, France's house-number reliability and the final v6 pipeline, are in `EXPERIMENTS.md` (rows 7–9) and `Documentation_template.md`.
+
 Scope: read-only analysis of the **v3** artifacts (feature_version `f4`, LightGBM+XGBoost blend, no
 stage2 — the latest *complete* run; `output_v4_stage2` and `output_v5` are still running and excluded).
 All numbers below are either pulled directly from `output_v3/debug/metrics_train.json`,

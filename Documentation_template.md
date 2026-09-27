@@ -1,7 +1,7 @@
 # ML Challenge 2026: Business Entity Resolution Solution Template
 
-**Team Name:** [TBD — team name as registered]
-**Team Members:** Adarsh Bhatt, Nakul, Prakhar, Yash [TBD — full names as registered]
+**Team Name:** napy
+**Team Members:** Adarsh Bhatt, Prakhar Saxena, Yash Goel, Nakul Verma
 **Submission Date:** 27 September 2026
 
 ---

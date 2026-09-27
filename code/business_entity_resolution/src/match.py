@@ -442,7 +442,7 @@ def fit_model(kind: str, device: str, X, y, tr, va, names, rounds: int = 3000) -
 
 
 def train_oof(X, y, i, n_s1, folds: int, frac: float, names: list[str], kinds: list[str], device: str,
-              fold_of_s1: np.ndarray | None = None, final: bool = True):
+              fold_of_s1: np.ndarray | None = None, final: bool = True, rounds: int = 3000):
     """Out-of-fold probabilities for EVERY train pair (folds grouped by S1), per model kind. Each fold's
     model trains on a `frac` sample of the other folds' S1 records (all their pairs), with 10% of that
     sample held out for early stopping - so OOF covers all S1s and the one-to-one competition between
@@ -460,7 +460,7 @@ def train_oof(X, y, i, n_s1, folds: int, frac: float, names: list[str], kinds: l
         for f in range(folds):
             t0 = time.time()
             tr, va, pr = (fold != f) & samp & ~es, (fold != f) & samp & es, fold == f
-            futs = {k: ex.submit(fit_model, k, device, X, y, tr, va, names) for k in kinds}
+            futs = {k: ex.submit(fit_model, k, device, X, y, tr, va, names, rounds) for k in kinds}
             for k, fu in futs.items():
                 m = fu.result()
                 oof[k][pr] = m.predict(X[pr])
@@ -469,7 +469,7 @@ def train_oof(X, y, i, n_s1, folds: int, frac: float, names: list[str], kinds: l
             log(f"fold {f}: {time.time() - t0:.0f}s")
         finals = {}
         if final:
-            futs = {k: ex.submit(fit_model, k, device, X, y, samp & ~es, samp & es, names) for k in kinds}
+            futs = {k: ex.submit(fit_model, k, device, X, y, samp & ~es, samp & es, names, rounds) for k in kinds}
             finals = {k: fu.result() for k, fu in futs.items()}
     for k, m in finals.items():
         log(f"final {k}: best_iter={m.best_iteration} ({m.seconds:.0f}s)")
@@ -578,6 +578,7 @@ def main():
                     help="comma list of lgb (LightGBM, CPU) and xgb (XGBoost); two kinds are blended")
     ap.add_argument("--device", choices=["cpu", "cuda"], default="cpu", help="device for XGBoost")
     ap.add_argument("--no-cache", action="store_true", help="recompute candidate pairs and features")
+    ap.add_argument("--rounds", type=int, default=3000, help="max boosting rounds (early stopping on 10%% of entities)")
     ap.add_argument("--stage2", action="store_true",
                     help="second-stage model on stage-1 OOF probabilities + sibling agreement (kept only if OOF improves)")
     ap.add_argument("--validate-only", action="store_true", help="train + OOF only, no test outputs")
@@ -627,7 +628,7 @@ def main():
         log(f"done (leave-one-country-out) in {time.time() - t0:.0f}s")
         return
     t_model = time.time()
-    oof, finals, imp = train_oof(X, y, i, len(s1), a.folds, a.train_frac, cols, kinds, a.device)
+    oof, finals, imp = train_oof(X, y, i, len(s1), a.folds, a.train_frac, cols, kinds, a.device, rounds=a.rounds)
     w = blend_weight(oof, y)
     p_oof = blend(oof, w)
     log(f"models trained in {time.time() - t_model:.0f}s; blend weight on {kinds[0]} = {w}; "
@@ -664,7 +665,7 @@ def main():
         X = np.hstack([X, G.to_numpy().astype(np.float32)])
         del G
         log(f"stage 2: {len(cols2) - len(cols)} extra features in {time.time() - t2:.0f}s")
-        oof2, finals2, imp2 = train_oof(X, y, i, len(s1), a.folds, a.train_frac, cols2, kinds, a.device)
+        oof2, finals2, imp2 = train_oof(X, y, i, len(s1), a.folds, a.train_frac, cols2, kinds, a.device, rounds=a.rounds)
         w2 = blend_weight(oof2, y)
         best2, table2 = decide.tune_vec(i, j, blend(oof2, w2).astype(np.float64), y, n_true, ctry, MIX)
         table2.to_csv(dbg / "decision_rules_stage2.csv", index=False)
