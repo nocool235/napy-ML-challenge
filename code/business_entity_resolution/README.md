@@ -22,28 +22,23 @@ pip install -r requirements.txt
 # 1. normalise once (3-12 min on 28 cores; resumable: finished parts are skipped)
 python src/prep.py --data-dir ../../dataset --work-dir ../../work
 
-# 2. retrieval (hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8), cascade pruner with the final
-#    stricter cut (pruner score >= 0.01: 7.8 candidates per S1 on test), 102 pair features, XGBoost on all train
-#    entities (5-fold out-of-fold), stage 2, test outputs (~2.5 h on 28 cores + GPU; --device cpu also works).
-#    Its first log line names the norm-/pairs-/feat- cache directories used in step 3.
+# 2. retrieval (hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8), cascade pruner (99.7% of retrieved
+#    true pairs: 10.8 candidates per S1 on test), 102 pair features, LightGBM + XGBoost 5-fold out-of-fold, stage 2,
+#    test outputs (~3 h on 28 cores + GPU; --device cpu also works). Its first log line names the norm-/feat- cache
+#    directories used in step 3.
 python src/match.py --data-dir ../../dataset --work-dir ../../work --out-dir ../../run \
-    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --prune-threshold 0.01 \
-    --models xgb --device cuda --train-frac 1.0 --stage2
+    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
 
 # 3. decision rule (expected-F0.5, one-to-one, alpha 1.5) + house-number likelihood correction (~1 min)
 python src/postprocess.py --run-dir ../../run --norm-dir ../../work/norm-<key> --out-dir ../../output \
-    --rule expF:1.5 --house-lr ../../work/feat-<key> --test-feat ../../work/feat-<key>/test_features.parquet \
-    --house-lr-scale <S>
+    --rule expF:1.5 --house-lr ../../work/feat-<key> --test-feat ../../work/feat-<key>/test_features.parquet
 
 # 4. check the files
 python ../../utils/validate_submission.py --matching ../../output/matching_results.tsv \
     --candidate ../../output/candidate_pairs.tsv --test-dir ../../dataset/test
 ```
 
-Steps 2–3 produce the submitted files (`<S>` is the house-correction scale of the final submission; see
-`Documentation_template.md`). `match.py` alone also writes a complete submission into `run/`, with the run's own
-out-of-fold-tuned rule and no house-number correction. `predict_test.py` rescores test from a finished run without
-retraining (e.g. at a different pruner cut).
+Steps 2–3 produce the submitted files. Step 3 was checked to reproduce them byte for byte from the run's saved probabilities. `match.py` alone also writes a complete submission into `run/`, with the run's own out-of-fold-tuned rule and no house-number correction. `--prune-threshold 0.01` gives a 27% smaller candidate set; its cost was measured at ≈ 0.001–0.003 F0.5, and it was not used. `predict_test.py` rescores test from a finished run without retraining.
 
 On Windows, set `PYTHONIOENCODING=utf-8` first.
 

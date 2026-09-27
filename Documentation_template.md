@@ -11,8 +11,8 @@
 For every Source 1 business we find its Source 2 / Source 3 records with a retrieve → prune → classify → decide pipeline.
 1. **Normalise:** country-agnostic rules, including rule-based Indic-script transliteration and phonetic skeletons.
 2. **Retrieve:** capped hash-join keys, plus exact sparse TF-IDF top-k search inside each country on two views: name + address words, and name character n-grams.
-3. **Prune:** a LightGBM cascade pruner on retrieval-time features only. It cuts 178M retrieved train pairs to **6.2 per S1** (7.8 per S1 on test) and keeps 96.8% of all true pairs.
-4. **Classify:** XGBoost (GPU) trained on every train entity, on 102 pair features. A second stage adds 21 features built from the first stage's probabilities.
+3. **Prune:** a LightGBM cascade pruner on retrieval-time features only. It cuts 178M retrieved train pairs to **8.5 per S1** (10.8 per S1 on test) and keeps 97.1% of all true pairs.
+4. **Classify:** a LightGBM + XGBoost blend on 102 pair features. A second stage adds 21 features built from the first stage's probabilities.
 5. **Decide:** a per-entity rule that maximises the expected F0.5 directly. It uses a one-to-one constraint and is tuned on a train rebuild that reproduces test's structure.
 
 Two findings mattered most. At full scale, **candidate recall, not the matcher**, was the first bottleneck (0.81 → 0.97). After that, the gap between out-of-fold and leaderboard scores came from how **test differs from train**. We measured two such differences without labels and corrected for them: records whose entity is missing from S1, and a lower house-number noise rate in the unseen country. Public leaderboard: 0.9365 → **0.958**.
@@ -83,15 +83,15 @@ Two findings mattered most. At full scale, **candidate recall, not the matcher**
 |---|---|---|---|---|
 | Hash keys only | 16.4M | 7.4 | 0.808 | 14.5M (8.4) |
 | Union with both TF-IDF views | 178.1M | 80.7 | 0.974 | – |
-| Pruner at 99.7% of retrieved positives | 18.7M | 8.5 | 0.971 | 18.6M (10.8) |
-| **Final pruner cut (score ≥ 0.01)** | **13.7M** | **6.2** | **0.968** | **13.6M (7.8)** |
+| **Final: pruner at 99.7% of retrieved positives** | **18.7M** | **8.5** | **0.971** | **18.6M (10.8)** |
+| Evaluated alternative: stricter cut (score ≥ 0.01) | 13.7M | 6.2 | 0.968 | 13.6M (7.8) |
 
-`output/candidate_pairs.tsv` holds exactly the final set above, the only pairs the matcher scores. That's 2 × 10⁻⁶ of the within-country all-pairs space. Test has more pairs per S1 than train because of its orphan records.
+`output/candidate_pairs.tsv` holds exactly the final set above, the only pairs the matcher scores. That's 3 × 10⁻⁶ of the within-country all-pairs space. Test has more pairs per S1 than train because of its orphan records.
 
 **How you ensured true matches were not lost:**
 - Recall of *all* true train pairs, including ones never retrieved, is measured after every stage.
 - The oracle F0.5 (a perfect matcher on our candidates) is reported for every run. At the 99.7% cut it is 0.987.
-- The final cut was chosen from a measured curve: F0.5 of the trained model on held-out train entities, at each candidate-set size. Each 10% fewer candidates cost ≈ 0.0005 F0.5. The final cut removes 27% of test candidates and 0.2% of the matches.
+- We measured the candidate-set size vs F0.5 curve (Appendix B). A 27% smaller set (score ≥ 0.01, 7.8 per S1 on test) cost ≈ 0.0014 F0.5 on India held-out entities. On the leaderboard, together with a retrained model, it scored 0.955 against 0.958, so we kept the 99.7% cut.
 
 ---
 
@@ -114,14 +114,14 @@ Two findings mattered most. At full scale, **candidate recall, not the matcher**
 - **Context:** rank and gap-to-best of key scores within the S1's candidates and within the S1 records competing for the same candidate.
 
 **Model type:**
-- **Stage 1:** XGBoost (Apache-2.0; hist, GPU, leaf-wise with 127 leaves, learning rate 0.08, early stopping on 10% of entities).
-  - Training is 5 folds grouped by S1 entity over all train pairs. Each fold's model trains on all the other folds' entities, so out-of-fold predictions cover every entity and the one-to-one competition is intact.
-  - Earlier versions blended LightGBM + XGBoost with each model seeing 30% of entities (a CPU-time constraint). Training XGBoost alone on 100% (3.3× the data) raised out-of-fold F0.5 on the same candidates by ≈ 0.002.
-- **Stage 2:** the same model type with 21 more features computed from stage-1 probabilities:
+- **Stage 1:** LightGBM (MIT; 127 leaves, learning rate 0.08, CPU) and XGBoost (Apache-2.0; hist, GPU, the same leaf-wise shape), blended 50/50 (the weight is chosen on out-of-fold log-loss). Both use early stopping on 10% of the training entities.
+  - Training is 5 folds grouped by S1 entity over all train pairs. Each fold's models train on 30% of the other folds' entities, so out-of-fold predictions cover every entity and the one-to-one competition is intact.
+  - Evaluated alternative (v6): XGBoost alone on 100% of entities, on the smaller candidate set. Out-of-fold F0.5 improved by ≈ 0.002, but the leaderboard fell (0.955 vs 0.958). The most likely cause is the unseen country, where out-of-fold scores can't see, so we kept the blend.
+- **Stage 2:** the same blend with 21 more features computed from stage-1 probabilities:
   - within the S1: rank, gap to best, runner-up, probability mass;
   - within the candidate: margin over the best competing S1;
   - agreement with the S1's other top candidates: name and address similarity, house-number and postcode agreement.
-  - It uses the same folds as stage 1 (out-of-fold probabilities, no leakage) and raised out-of-fold F0.5 from 0.969 to 0.975.
+  - It uses the same folds as stage 1 (out-of-fold probabilities, no leakage) and raised out-of-fold F0.5 from 0.968 to 0.975.
 
 **Threshold selection method:**
 - Macro F0.5 per entity is optimised directly, on out-of-fold probabilities for all 2.2M train entities. Every true match counts, including ones retrieval never found.
@@ -149,8 +149,8 @@ Two findings mattered most. At full scale, **candidate recall, not the matcher**
 | + TF-IDF word view + pruner + LightGBM (v2) | 0.965 | 0.985 | 0.936 | 0.966 | 0.949 | 0.9365 |
 | + de-noised features, LightGBM/XGBoost (v3) | 0.965 | 0.985 | 0.947 | 0.969 | 0.957 | 0.947 |
 | + char n-gram view, legal-form feature, stage 2 (v5) | 0.971 | 0.987 | 0.968 | 0.983 | 0.975 | 0.9526 |
-| + float64 rule, α 1.5, house-number correction | 0.971 | 0.987 | – | – | – | **0.958** |
-| **Final (v6): pruner cut 0.01 (27% fewer candidates), XGBoost on all entities, + stage 2, α 1.5, house-number correction** | 0.968 | 0.986 | 0.968 | 0.984 | 0.975 | [TBD] |
+| **Final: v5 + float64 rule, α 1.5, house-number correction** | **0.971** | **0.987** | 0.968 | 0.983 | 0.975 | **0.958** |
+| Alternative (v6): 27% fewer candidates, XGBoost on all entities | 0.968 | 0.986 | 0.968 | 0.984 | 0.975 | 0.955 |
 
 - **Held-out check (India, 617k train entities the final models never saw):** 0.9683 at the 99.7% cut; the orphan rebuild costs 0.0018.
 - **What moved the leaderboard, and why:** v5's out-of-fold gain (+0.018) produced only +0.006 on the leaderboard. Solving the public score for the unseen country (weights 0.47 / 0.38 / 0.15) implied France had dropped. Two unlabelled statistics explained it:
@@ -175,7 +175,7 @@ Two findings mattered most. At full scale, **candidate recall, not the matcher**
 
 - Measuring everything at full scale was the most valuable decision. Sample-scale results pointed at the matcher; full scale showed recall was the bottleneck.
 - Once recall was fixed, the remaining leaderboard gap came from how test differs from train, not from model capacity. Unlabelled statistics measured that difference and informed corrections that were identical for every country: a test-like rebuild for choosing the rule, and per-country noise rates.
-- A trained cascade pruner keeps the candidate set at 7.8 pairs per S1 on test, for 3.5 true matches per S1, at 96.8% recall of all true train pairs.
+- A trained cascade pruner keeps the candidate set at 10.8 pairs per S1 on test, for about 3.5 true matches per S1, at 97.1% recall of all true train pairs. A 27% smaller set is one flag away (`--prune-threshold 0.01`) at a measured cost of ≈ 0.001–0.003.
 
 ---
 
@@ -188,8 +188,8 @@ Code is in `code/business_entity_resolution/src/`; exact commands are in `code/b
 | Stage | Command | Output |
 |---|---|---|
 | Normalise (once) | `python src/prep.py --data-dir <dataset> --work-dir <work>` | parquet cache |
-| Train, OOF, stage 2, test outputs | `python src/match.py --data-dir <dataset> --work-dir <work> --out-dir <run> --tfidf-k 10 --char-k 8 --char-max-df 0.01 --prune-threshold 0.01 --models xgb --device cuda --train-frac 1.0 --stage2` | models, rule, OOF, test probabilities, `candidate_pairs.tsv` |
-| Decision + house-number correction | `python src/postprocess.py --run-dir <run> --norm-dir <work>/norm-… --out-dir output --rule expF:1.5 --house-lr <work>/feat-… --test-feat <work>/feat-…/test_features.parquet --house-lr-scale <S>` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` |
+| Train, OOF, stage 2, test outputs | `python src/match.py --data-dir <dataset> --work-dir <work> --out-dir <run> --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2` | models, rule, OOF, test probabilities, `candidate_pairs.tsv` |
+| Decision + house-number correction | `python src/postprocess.py --run-dir <run> --norm-dir <work>/norm-… --out-dir output --rule expF:1.5 --house-lr <work>/feat-… --test-feat <work>/feat-…/test_features.parquet` | `output/matching_results.tsv`, `output/candidate_pairs.tsv` (identical to the submitted files, verified byte for byte) |
 
 - **Modules:**
   - `normalize.py`, `translit.py`, `prep.py`: normalisation;
@@ -219,14 +219,14 @@ Code is in `code/business_entity_resolution/src/`; exact commands are in `code/b
   | 5.5 | 0.9650 |
   | 4.8 | 0.9617 |
 
-  The loss accelerates past a ~30% cut; the final cut (6.2 per S1 on India train, 7.8 per S1 on test) sits at that knee.
+  The loss accelerates past a ~30% cut. The submitted files use the 8.6 point (10.8 per S1 on test).
 
-- **Predicted test structure (final):**
+- **Predicted test structure (final submission):**
 
   | Country | Singleton rate | Matches per S1 |
   |---|---|---|
-  | France | 5.2% | 3.33 |
-  | India | 6.3% | 3.25 |
+  | France | 5.2% | 3.34 |
+  | India | 6.2% | 3.26 |
   | US | 5.5% | 3.40 |
 
   Train truth is 5.6% singletons and 3.46 matches per S1.

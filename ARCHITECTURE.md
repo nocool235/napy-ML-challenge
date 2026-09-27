@@ -16,7 +16,7 @@ else is either the shared normalisation stage, a fallback, or legacy code.
 
 | Pipeline | Entry point | Status |
 |---|---|---|
-| **Main: `match.py` + `postprocess.py`** | `src/match.py`, `src/postprocess.py` | Final (v6). Retrieval: hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8. Cascade pruner with a stricter cut (score ≥ 0.01; 7.8 candidates per S1 on test). 102 pair features (`f5`). XGBoost on all train entities, 5-fold OOF, then stage 2 (+21 features). `postprocess.py` applies the rule (expF α 1.5, one-to-one) and the house-number correction. |
+| **Main: `match.py` + `postprocess.py`** | `src/match.py`, `src/postprocess.py` | Final (upload 4, LB 0.958). Retrieval: hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8. Cascade pruner at 99.7% of retrieved true pairs (10.8 candidates per S1 on test). 102 pair features (`f5`). LightGBM + XGBoost, 5-fold OOF, then stage 2 (+21 features). `postprocess.py` applies the rule (expF α 1.5, one-to-one) and the house-number correction. |
 | Fallback: crude baseline | `tools/crude_baseline.py` | No-ML hash-join + one global threshold. Valid, full scale, test-mix ≈ 0.823. Kept as the safety net. |
 | Legacy: `run.py` | `src/run.py` → `blocking.py` → `features.py` → `model.py` | Pandas, in-memory, never run above a 1% sample. Superseded by `match.py`; `decide.py`/`metric.py` are shared. |
 
@@ -59,9 +59,9 @@ flowchart TD
         R1["retrieval.hash_candidates<br/>4 capped hash-join keys, per country<br/>(i, j, kbits)"]
         R2["retrieval.tfidf_candidates<br/>word TF-IDF on name_addr (top-10) +<br/>char 3-4-grams on name_core (top-8), df ≤ 1%<br/>exact sparse_dot_topn, per country"]
         U["union + retrieval features<br/>tf_cos, tf_rank, key flags,<br/>per-S1 / per-candidate ranks and gaps"]
-        PR["cascade_pruner.Pruner<br/>LightGBM on 19 retrieval features<br/>fit at 99.7% of retrieved true pairs;<br/>final cut score ≥ 0.01 (7.8 per S1 on test)"]
+        PR["cascade_pruner.Pruner<br/>LightGBM on 19 retrieval features<br/>keep 99.7% of retrieved true pairs<br/>(10.8 per S1 on test; --prune-threshold for smaller sets)"]
         FE["pair_features<br/>13 rapidfuzz scores, postcode / house / street<br/>agreement, name frequency, context ranks"]
-        M["XGBoost (GPU) on all train entities, 5-fold OOF by S1<br/>+ stage 2: 21 features over stage-1 probabilities<br/>(LightGBM + XGBoost blend also supported)"]
+        M["LightGBM (CPU) + XGBoost (GPU), 5-fold OOF by S1<br/>+ stage 2: 21 features over stage-1 probabilities"]
         D["decide.tune_vec (OOF) + postprocess.py<br/>expected-F0.5, one-to-one, α 1.5 (orphan rebuild);<br/>house-number likelihood correction per country"]
         O["output/matching_results.tsv<br/>output/candidate_pairs.tsv (= the pairs the model scored)"]
         R1 --> U
@@ -233,8 +233,8 @@ replacement for `tune_vec` that costs nothing when the two agree.
 | v2: + word TF-IDF + pruner | 0.965 | 0.985 | 0.936 | 0.966 | 0.949 | 0.9365 |
 | v3: + de-noised features | 0.965 | 0.985 | 0.947 | 0.969 | 0.957 | 0.947 |
 | v5: + char view, legal feature, stage 2 | 0.971 | 0.987 | 0.968 | 0.983 | 0.975 | 0.952557 |
-| v5 + float64 rule, α 1.5, house correction | 0.971 | 0.987 | – | – | – | **0.958** |
-| **v6: lean cut (−27% candidates), XGBoost on 100% of entities** | 0.968 | 0.986 | 0.968 | 0.984 | 0.975 | [pending] |
+| **Final: v5 + float64 rule, α 1.5, house correction** | 0.971 | 0.987 | 0.968 | 0.983 | 0.975 | **0.958** |
+| v6: lean cut (−27% candidates), XGBoost on 100% of entities | 0.968 | 0.986 | 0.968 | 0.984 | 0.975 | 0.955 (not kept) |
 
 Full-scale facts for the final pipeline:
 - **Retrieval (train):** hash keys give 16.4M pairs. The word view took 6 min for India and 13 min for US; the char view 10 and 50 min (the US figure was inflated by contention; about 22 min clean). The union has 178M pairs (80.7 per S1) and recall 0.974.
@@ -276,7 +276,7 @@ The morning plan (§ above, steps 1–6) was completed. Stage 2 shipped: v5 onwa
 3. A smaller candidate set, since the organisers rank it: the pruner cut 0.01.
 4. v6: XGBoost on all train entities, on the lean set.
 
-Packaging: `python tools/package_submission.py --team napy --doc Documentation_template.md --output-dir <final>`.
+v6 scored 0.955 on the leaderboard, below 0.958, so the **final package is upload 4** (`output_v5_fix15_hlr/`). The current code reproduces it byte for byte from v5's saved probabilities. Packaging: `python tools/package_submission.py --team napy --doc Documentation_template.md --output-dir output_v5_fix15_hlr`.
 
 ---
 
@@ -284,6 +284,7 @@ Packaging: `python tools/package_submission.py --team napy --doc Documentation_t
 
 | Time (IST) | Change |
 |---|---|
+| 09-27 ~22:50 | Upload 5 (v6) = 0.955, so the final package is upload 4 (0.958). Docs set to that configuration. |
 | 09-27 ~22:15 | Upload 4 (v5 + post-processing) = **0.958**. v6 trains XGBoost on 100% of entities on the lean candidate set (pruner cut 0.01; −27% candidates): OOF 0.9751. Added `match.py --prune-threshold/--rounds/--norm-dir/--pair-cache/--feat-cache`. The house correction is now guarded (min 1000 confident pairs, factor ≥ 0.05). Docs refreshed for the final package (team napy). |
 | 09-27 ~20:25 | v5 LB 0.952557 (+0.0056 vs +0.0175 OOF; France likely got worse). Fixed a float32 precision bug in `decide.expf_mask` (+0.0005 OOF) and chunked prediction in `match.Model.predict`. Added `predict_test.py`, `postprocess.py` (`--rule`, `--house-lr`, `--em-prior`), token maps (`build_token_maps.py`, `prep --token-maps`) and `tools/holdout_eval.py`. Findings: France's confident-pair house-conflict rate is 0.85% vs ≥ 5.1% in every training country, handled by the house-LR correction. Orphans (test ≈ train minus 20% of S1) cost India ~0.0018 and favour expF α 1.5. B1/B2 token maps are flat without a retrain. |
 | 09-27 ~16:40 | Committed the tier-1/2 work below (f5 legal-conflict feature, generalised `EXTRA_VIEWS` retrieval, `decide.tune_robust`, version-keyed caching, B15 normalisation fixes, `stage2.py`'s LOCO no-transfer finding, sibling-propagation diagnostic). `output_v5` (char+addr+ns retrieval, B15, f5, stage2, lgb+xgb) running in the background. |
