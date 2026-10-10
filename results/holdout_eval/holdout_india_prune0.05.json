@@ -1,0 +1,131 @@
+{
+  "countries": [
+    "india"
+  ],
+  "rebuild": false,
+  "norm": "cache\\real_prep\\norm-0c9c1740ce",
+  "holdout_s1": 617233,
+  "pairs": 4263995,
+  "pairs_per_s1": 4.828,
+  "recall_holdout": 0.92977,
+  "oracle_f05_holdout": 0.97331,
+  "f05_holdout": 0.96205,
+  "f05_holdout_singletons": 0.96788,
+  "f05_holdout_matched": 0.9617,
+  "f05_train_part (in-sample)": 0.96688,
+  "seconds": 255,
+  "rules": [
+    {
+      "rule": "expF",
+      "param": 1.0,
+      "o2o": true,
+      "f05_holdout": 0.96205,
+      "pairs_kept": 2807996,
+      "precision": 0.99552
+    },
+    {
+      "rule": "expF",
+      "param": 1.25,
+      "o2o": true,
+      "f05_holdout": 0.96193,
+      "pairs_kept": 2800450,
+      "precision": 0.99612
+    },
+    {
+      "rule": "expF",
+      "param": 1.5,
+      "o2o": true,
+      "f05_holdout": 0.9617,
+      "pairs_kept": 2794340,
+      "precision": 0.99651
+    },
+    {
+      "rule": "expF",
+      "param": 2.0,
+      "o2o": true,
+      "f05_holdout": 0.96116,
+      "pairs_kept": 2784318,
+      "precision": 0.99707
+    },
+    {
+      "rule": "expF",
+      "param": 2.5,
+      "o2o": true,
+      "f05_holdout": 0.96058,
+      "pairs_kept": 2776069,
+      "precision": 0.99743
+    },
+    {
+      "rule": "expF",
+      "param": 3.0,
+      "o2o": true,
+      "f05_holdout": 0.95999,
+      "pairs_kept": 2768911,
+      "precision": 0.99769
+    },
+    {
+      "rule": "expF",
+      "param": 4.0,
+      "o2o": true,
+      "f05_holdout": 0.95889,
+      "pairs_kept": 2756641,
+      "precision": 0.99804
+    },
+    {
+      "rule": "thr",
+      "param": 0.5,
+      "o2o": true,
+      "f05_holdout": 0.9613,
+      "pairs_kept": 2836012,
+      "precision": 0.9925
+    },
+    {
+      "rule": "thr",
+      "param": 0.6,
+      "o2o": true,
+      "f05_holdout": 0.96177,
+      "pairs_kept": 2823598,
+      "precision": 0.99419
+    },
+    {
+      "rule": "thr",
+      "param": 0.67,
+      "o2o": true,
+      "f05_holdout": 0.96177,
+      "pairs_kept": 2815282,
+      "precision": 0.99508
+    },
+    {
+      "rule": "thr",
+      "param": 0.7,
+      "o2o": true,
+      "f05_holdout": 0.96172,
+      "pairs_kept": 2811499,
+      "precision": 0.99543
+    },
+    {
+      "rule": "thr",
+      "param": 0.8,
+      "o2o": true,
+      "f05_holdout": 0.96102,
+      "pairs_kept": 2796345,
+      "precision": 0.99656
+    },
+    {
+      "rule": "thr",
+      "param": 0.9,
+      "o2o": true,
+      "f05_holdout": 0.95855,
+      "pairs_kept": 2769108,
+      "precision": 0.99777
+    },
+    {
+      "rule": "thr",
+      "param": 0.95,
+      "o2o": true,
+      "f05_holdout": 0.95439,
+      "pairs_kept": 2735524,
+      "precision": 0.99852
+    }
+  ]
+}

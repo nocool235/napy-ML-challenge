@@ -1,55 +1,101 @@
 # Business Entity Resolution: Amazon ML Challenge 2026
 
-This pipeline finds every Source 2 and Source 3 record that belongs to each Source 1 entity. Scoring is macro F0.5 per Source 1 entity.
+For every Source 1 record, this finds the Source 2 / Source 3 records of the same business. Scoring is macro F0.5 per Source 1 record.
 
 ```
-raw TSVs ─► normalize.py ─► blocking.py ─► features.py ─► model.py (LightGBM, 2 stages) ─► decide.py ─► output/*.tsv
-             canonical       TF-IDF kNN     fuzzy + TF-IDF    grouped CV → OOF probs          rule tuned on
-             names/addrs     5 views,       + postcode/house  stage 2 = stage 1 + competition  OOF macro F0.5
-                             both directions + context ranks   features over OOF probs         (+ one-to-one)
+prep.py        normalise every record once (Indic transliteration, phonetic skeletons, canonical names/addresses)
+                 -> parquet cache
+match.py       retrieval.py       hash-join keys + exact TF-IDF top-10 per S2/S3 record, per country
+               cascade_pruner.py  LightGBM on retrieval features, keeps 99.7% of retrieved true pairs
+               match.py           ~90 pair features -> LightGBM (5-fold out-of-fold) -> decision rule tuned on
+                                  the exact macro F0.5 (decide.py) -> output/*.tsv
 ```
 
 ## Reproduce
 
-Python 3.11. Run all commands from `code/business_entity_resolution/`.
+Python 3.11 or later. Run everything from this folder. The organisers' `dataset/` must have the starter-kit layout
+(`dataset/train/train_source1.tsv` … `dataset/test/test_source3.tsv`).
 
 ```bash
 pip install -r requirements.txt
-# dataset/ has the layout from the starter kit: dataset/train/train_source1.tsv ... dataset/test/test_source3.tsv
-python src/run.py --data-dir ../../dataset --out-dir ../../output
-python3 ../../utils/validate_submission.py --matching ../../output/matching_results.tsv \
-        --candidate ../../output/candidate_pairs.tsv --test-dir ../../dataset/test
+
+# 1. normalise once (3-12 min on 28 cores; resumable: finished parts are skipped)
+python src/prep.py --data-dir ../../dataset --work-dir ../../work
+
+# 2. retrieval (hash keys + word TF-IDF top-10 + name char n-gram TF-IDF top-8), cascade pruner (99.7% of retrieved
+#    true pairs: 10.8 candidates per S1 on test), 102 pair features, LightGBM + XGBoost 5-fold out-of-fold, stage 2,
+#    test outputs (~3 h on 28 cores + GPU; --device cpu also works). Its first log line names the norm-/feat- cache
+#    directories used in step 3.
+python src/match.py --data-dir ../../dataset --work-dir ../../work --out-dir ../../run \
+    --tfidf-k 10 --char-k 8 --char-max-df 0.01 --models lgb,xgb --device cuda --stage2
+
+# 3. decision rule (expected-F0.5, one-to-one, alpha 2.0) + house-number likelihood correction (~1 min)
+python src/postprocess.py --run-dir ../../run --norm-dir ../../work/norm-<key> --out-dir ../../output \
+    --rule expF:2.0 --house-lr ../../work/feat-<key> --test-feat ../../work/feat-<key>/test_features.parquet
+
+# 4. check the files
+python ../../utils/validate_submission.py --matching ../../output/matching_results.tsv \
+    --candidate ../../output/candidate_pairs.tsv --test-dir ../../dataset/test
 ```
 
-The run writes these files:
-- `output/matching_results.tsv`: the file you upload to the leaderboard.
-- `output/candidate_pairs.tsv`: the exact candidate set the model scored.
+Steps 2–3 produce the submitted files. Step 3 was checked to reproduce them byte for byte from the run's saved probabilities. `match.py` alone also writes a complete submission into `run/`, with the run's own out-of-fold-tuned rule and no house-number correction. `--prune-threshold 0.01` gives a 27% smaller candidate set; its cost was measured at ≈ 0.001–0.003 F0.5, and it was not used. `predict_test.py` rescores test from a finished run without retraining.
+
+On Windows, set `PYTHONIOENCODING=utf-8` first.
+
+`match.py` writes:
+- `output/matching_results.tsv`: the leaderboard file.
+- `output/candidate_pairs.tsv`: exactly the pairs the final model scored.
 - `output/debug/`:
-  - `metrics_train.json`: blocking recall, oracle F0.5, and OOF F0.5 split by country, singletons and matched entities.
-  - `oof_errors.tsv`: out-of-fold false positives and false negatives with the raw text. **Read this after every change.**
-  - `blocking_misses.tsv`: true pairs that blocking never proposed. These cap your recall.
-  - `decision_rules.csv`: the OOF score of every threshold and decision rule that was tried.
-  - `importance_stage*.csv`: feature importances.
-- `output/submission_log.tsv`: one line per run. Add the leaderboard (LB) score by hand after each upload.
+  - `metrics_train.json`: recall, oracle F0.5, out-of-fold F0.5 per country, the chosen rule and test structure;
+  - `decision_rules.csv`: every rule tried, with its out-of-fold score;
+  - `importance_*.tsv`: feature importances;
+  - the model files and `test_probs.parquet`.
 
-### Flags
-| flag | use |
+### Flags (`match.py`)
+| flag | default | use |
+|---|---|---|
+| `--tfidf-k` | 10 | word-view TF-IDF top-k per S2/S3 record. `0` means hash-join keys only (no pruner) |
+| `--char-k`, `--addr-k`, `--ns-char-k` | off | top-k for the extra retrieval views (name char n-grams, address words, no-space-name char n-grams); each independent, unioned onto the hash+word candidates |
+| `--prune-recall` | 0.997 | Share of retrieved true pairs the cascade pruner must keep |
+| `--prune-threshold` | 0 | Stricter pruner cut on top (keep pruner score ≥ this): a smaller candidate set. The final run uses 0.01 |
+| `--norm-dir`, `--pair-cache`, `--feat-cache` | derived | Use these cache directories instead of the derived names (e.g. after a normalisation code edit) |
+| `--models` | `lgb` | `lgb`, `xgb` or `lgb,xgb`. Two models are blended, with the weight chosen on out-of-fold log-loss |
+| `--device` | `cpu` | `cuda` runs XGBoost on a GPU (optional; not needed to reproduce) |
+| `--folds`, `--train-frac` | 5, 0.3 | Out-of-fold folds, and the share of train S1 records each model trains on |
+| `--rounds` | 3000 | Maximum boosting rounds (early stopping on 10% of the training entities) |
+| `--stage2` | – | Second-stage model over stage-1 probabilities and sibling agreement; used only if it improves out-of-fold |
+| `--cv` | `group` | `country` = leave-one-country-out (train on one country, score the other), a proxy for an unseen country |
+| `--validate-only` | – | Train and out-of-fold only; no test outputs |
+| `--no-cache` | – | Recompute candidate pairs and features |
+
+Candidate pairs (and the pruner) are cached in `<work>/pairs-<key>/`, and features in `<work>/feat-<key>/`. The key
+is a hand-bumped version constant per module (`RETRIEVAL_VERSION`, `PRUNER_VERSION`, `FEATURE_VERSION`) plus the
+config values that affect output, not a source hash — so a rerun reuses the cache whenever the relevant version
+hasn't changed, regardless of unrelated edits elsewhere in the file.
+
+Extra retrieval views beyond hash keys + word TF-IDF are configurable and independent: `--char-k`/`--char-max-df`
+(name character 3–4-grams), `--addr-k`/`--addr-max-df` (address words), `--ns-char-k`/`--ns-char-max-df` (name with
+spaces stripped, character n-grams). Any combination can be on or off; each adds its own columns to the pruner and
+feature set automatically.
+
+## Source layout
+| module | role |
 |---|---|
-| `--validate-only` | Runs train CV only. Use it for fast iteration on features or blocking. |
-| `--cv country` | Leave-one-country-out CV: trains on US and scores India, then the reverse. It is the best offline proxy for France. |
-| `--no-stage2` | Uses the stage-1 model only. |
-| `--no-cache` | Recomputes everything. **Delete `cache/` or pass this flag after you change `normalize.py`, `blocking.py`, `features.py` or `config.py` views/K**. The cache stores pairs and features. |
-
-To smoke-test without the real data, run `python src/synthetic.py --out ../../synthetic_dataset`. It writes fake data in the same layout, with a France slice in the test set. The synthetic data is much easier than the real data, so its scores mean nothing.
-
-## Where to change things
-- `config.py`: blocking views, K per view, LightGBM parameters and the threshold grid.
-- `normalize.py`: the abbreviation, legal-suffix, state and landmark dictionaries. Most gains come from here, driven by `oof_errors.tsv`.
-- `features.py`: add new pair features to `pair_features()`. New columns are picked up automatically.
-- `decide.py`: the decision rules. `thr` keeps candidates with p ≥ t. `expF` keeps the top-k set with the highest expected F0.5. Both have an optional one-to-one constraint, which uses the fact that S1 is deduplicated.
+| `prep.py`, `normalize.py`, `translit.py` | Normalisation into a parquet cache keyed on a hash of the normalisation code |
+| `retrieval.py` | `hash_candidates` (capped hash-join keys), `tfidf_candidates` (exact sparse top-k), `tfidf_pair_cosine` |
+| `cascade_pruner.py` | Retrieval-time features and the LightGBM pruner |
+| `match.py` | Main driver: pair features, LightGBM/XGBoost out-of-fold training, blend, decision, outputs |
+| `stage2.py` | Second-stage features: probability context within each S1 / candidate, sibling agreement |
+| `predict_test.py` | Test-only scoring with a finished run's saved models and rule; optional per-country rescoring and splicing |
+| `postprocess.py` | `--em-prior`: per-country label-shift (EM) correction of test probabilities, then the same rule |
+| `build_token_maps.py` | Optional token maps for normalisation: glued-word splits (unsupervised) and label-mined spellings |
+| `decide.py`, `metric.py` | Vectorised decision rules and the exact competition metric |
+| `utils.py` | Logging with ETA, hashing, TSV reading |
+| `run.py`, `blocking.py`, `features.py`, `model.py`, `config.py` | **Legacy, not used by the final pipeline:** the earlier sample-scale prototype, kept for reference |
 
 ## Rule compliance
-- There are no external lookups, APIs or geocoding. Every dictionary is hand-written in `normalize.py`.
-- The TF-IDF vectorisers are fitted on the text of the train and test records without labels.
-- Models are LightGBM (MIT) and scikit-learn (BSD-3). rapidfuzz (MIT) provides the string metrics. There is no pretrained model and everything runs on CPU.
-- Country is used only as a `same_country` feature. The pipeline accepts any country label.
+- No external data, APIs or geocoding. Every dictionary is hand-written in `normalize.py` / `translit.py`, and the phonetic-skeleton maps are learned from train Source 1 only.
+- TF-IDF vectorisers and source-noise token lists are fit on the provided records without labels.
+- Models: LightGBM (MIT); optional XGBoost (Apache-2.0). String metrics: rapidfuzz (MIT). Sparse top-k: sparse_dot_topn (Apache-2.0). No pretrained model; everything runs on CPU.
+- Country is treated as an open set of labels. It only scopes retrieval and statistics to same-country records; no rule or feature branches on a specific country, so France runs through unchanged.
+- Per-country statistics are computed the same way for every country, from unlabelled data. They are the TF-IDF vocabularies, the source-noise tokens and, in `postprocess.py --house-lr`, the house-number conflict rate among confident pairs. `--house-lr` only acts where a country's rate is below every training country's, which here happens to be France; it never names a country.

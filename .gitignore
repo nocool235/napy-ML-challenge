@@ -29,3 +29,6 @@ logs/
 
 # pipeline work dirs (parquet caches, models, logs)
 work*/
+
+# local working scratchpad, never committed
+TODO.md

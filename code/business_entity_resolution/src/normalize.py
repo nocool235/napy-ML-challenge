@@ -87,6 +87,21 @@ def set_skeleton_maps(maps: dict[str, dict[str, str]]):
     SKEL_MAPS["name"], SKEL_MAPS["addr"] = maps.get("name", {}), maps.get("addr", {})
 
 
+# Optional token maps, empty (off) by default: token -> replacement text (one or more tokens), applied to a
+# name / address right after basic_clean, before the canonical dictionaries. Built from data by
+# build_token_maps.py (glued-word splits and label-mined spellings); prep passes them to its workers.
+TOKEN_MAPS: dict[str, dict[str, str]] = {"name": {}, "addr": {}}
+
+
+def set_token_maps(maps: dict[str, dict[str, str]]):
+    TOKEN_MAPS["name"], TOKEN_MAPS["addr"] = dict(maps.get("name", {})), dict(maps.get("addr", {}))
+
+
+def _mapped(s: str, field: str) -> str:
+    m = TOKEN_MAPS[field]
+    return " ".join(m.get(t, t) for t in s.split()) if m else s
+
+
 def build_skeleton_map(token_counts: dict[str, int], canon: dict[str, str], min_count: int = 3,
                        min_len: int = 4, lead: float = 1.0) -> dict[str, str]:
     """skeleton -> dominant Latin token. Candidates are pooled by canonical form (sri/shree/shri count
@@ -125,7 +140,7 @@ ADDR_CANON = {
     "circle": "cir", "cir": "cir",
     "terrace": "ter", "ter": "ter",
     "suite": "ste", "ste": "ste", "sainte": "ste", "unit": "ste",
-    "apartment": "apt", "apt": "apt", "flat": "apt",
+    "apartment": "apt", "apt": "apt", "flat": "apt", "appartement": "apt",
     "building": "bldg", "bldg": "bldg", "bld": "bldg", "batiment": "bldg", "bat": "bldg",
     "floor": "flr", "flr": "flr", "fl": "flr", "etage": "flr",
     "near": "near", "nr": "near", "nar": "near",
@@ -152,8 +167,8 @@ ADDR_CANON = {
     "route": "rte", "rte": "rte",
     "faubourg": "fbg", "fbg": "fbg",
     "rue": "rue", "r": "rue",
-    "quai": "quai", "qu": "quai",
-    "cours": "crs",
+    "quai": "quai", "qu": "quai", "q": "quai",
+    "cours": "cross",
     "first": "1", "second": "2", "third": "3", "fourth": "4", "fifth": "5",
     "sixth": "6", "seventh": "7", "eighth": "8", "ninth": "9", "tenth": "10",
     "premier": "1", "premiere": "1", "deuxieme": "2", "troisieme": "3",
@@ -215,6 +230,10 @@ PHRASES = {
     "bombay": "mumbai", "calcutta": "kolkata", "madras": "chennai", "bengaluru": "bangalore",
     "gurugram": "gurgaon", "poona": "pune", "mysuru": "mysore",
     "mahatma gandhi": "mg", "m g": "mg",
+    # short administrative codes one source uses that the state-name map above doesn't catch
+    "dl": "delhi", "tg": "ts",
+    # native-language romanisations of state names (a different source writes these than the English form)
+    "tamizhnatu": "tn", "keralam": "kl", "pashchimabang": "wb",
     # FR
     "cedex": "",
 }
@@ -229,6 +248,9 @@ _MS_RE = re.compile(r"(?i)\b(m\s*/\s*s|messrs)\b\.?")
 _HANDLE_RE = re.compile(r"(^|\s)@(?=\w)")
 _CO_RE = re.compile(r"(?i)\bc\s*/\s*o\b")
 _HNO_RE = re.compile(r"\b(h|d|hno|dno)\s*no\b")
+# French house-number marker ("N° 8"). Stripped on raw text: basic_clean drops the degree sign as
+# punctuation, which otherwise leaves a bare "n" token indistinguishable from north -> n.
+_NDEG_RE = re.compile(r"(?i)\bn\s*°\s*")
 _BIS_RE = re.compile(r"\b(\d+)\s*(bis|ter|quater)\b")
 _LEET = str.maketrans("013458", "oleasb")
 
@@ -305,11 +327,11 @@ def name_fields(raw) -> dict:
     if ind:
         raw = _translit_words(raw, "name")
     raw = _HANDLE_RE.sub(r"\1", _MS_RE.sub(" ", raw))
-    s = basic_clean(raw)
+    s = _mapped(basic_clean(raw), "name")
     # alternative names: DBA / trade names / parenthesised parts
     parts = [p.strip() for p in _DBA_RE.split(s) if p.strip()]
     paren = re.findall(r"\(([^)]*)\)", raw.lower())
-    parts += [basic_clean(p) for p in paren if basic_clean(p)]
+    parts += [_mapped(basic_clean(p), "name") for p in paren if basic_clean(p)]
     s_noparen = re.sub(r"\([^)]*\)", " ", s)
     s_noparen = _DBA_RE.sub(" ", s_noparen)
 
@@ -356,15 +378,15 @@ def addr_fields(raw) -> dict:
     ind = bool(INDIC_RE.search(raw))
     if ind:
         raw = _translit_words(raw, "addr")
-    raw = _CO_RE.sub(" ", raw)
+    raw = _NDEG_RE.sub(" ", _CO_RE.sub(" ", raw))
     comps = re.split(r"[,;]", raw)
     comps = [FR_ADMIN.get(_admin_key(c), c) for c in comps]
     raw = ", ".join(comps)
-    s = _addr_prep(basic_clean(raw))
+    s = _addr_prep(_mapped(basic_clean(raw), "addr"))
 
     # landmark removal and positional number logic work on comma-separated segments
     raw_l = strip_accents(raw).lower()
-    segs = [basic_clean(x) for x in re.split(r"[,;]", raw_l)]
+    segs = [_mapped(basic_clean(x), "addr") for x in re.split(r"[,;]", raw_l)]
     keep, landmarks = [], []
     seg_toks = []
     for seg in segs:
@@ -404,6 +426,23 @@ def addr_fields(raw) -> dict:
         "addr_ntok": len(toks),
         "addr_ind": int(ind),
     }
+
+
+def name_map_tokens(raw) -> list[str]:
+    """The tokens TOKEN_MAPS['name'] is applied to: name_fields' text up to basic_clean, unmapped."""
+    raw = raw if isinstance(raw, str) else ""
+    if INDIC_RE.search(raw):
+        raw = _translit_words(raw, "name")
+    return basic_clean(_HANDLE_RE.sub(r"\1", _MS_RE.sub(" ", raw))).split()
+
+
+def addr_map_tokens(raw) -> list[str]:
+    """The tokens TOKEN_MAPS['addr'] is applied to: addr_fields' text up to basic_clean, unmapped."""
+    raw = raw if isinstance(raw, str) else ""
+    if INDIC_RE.search(raw):
+        raw = _translit_words(raw, "addr")
+    raw = _NDEG_RE.sub(" ", _CO_RE.sub(" ", raw))
+    return basic_clean(", ".join(FR_ADMIN.get(_admin_key(c), c) for c in re.split(r"[,;]", raw))).split()
 
 
 def normalize_frame(df: pd.DataFrame) -> pd.DataFrame:
